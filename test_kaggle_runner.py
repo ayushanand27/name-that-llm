@@ -58,3 +58,49 @@ def test_metadata_drops_source_id_no():
     import kaggle_runner as k
     m = k.make_metadata({"id": "rohan/x", "id_no": 12345, "dataset_sources": ["a/b"]}, "me", "my-run")
     assert "id_no" not in m and m["id"] == "me/my-run" and m["dataset_sources"] == ["a/b"]
+
+
+def test_pool_run_args():
+    import kaggle_runner as k
+    assert "--use_pool 0" in k.pool_run_args("A") and "--epochs 3" in k.pool_run_args("A")
+    b = k.pool_run_args("B")
+    assert "--use_pool 1" in b and "--cap 1500" in b and "--kimi_high_only 0" in b
+    assert "--kimi_high_only 1" in k.pool_run_args("C")
+    assert "--probe_only 1" in k.pool_run_args("probe") and "--use_pool 1" in k.pool_run_args("probe")
+    import pytest
+    with pytest.raises(KeyError):
+        k.pool_run_args("Z")
+
+
+def test_build_pool_notebook(tmp_path):
+    import kaggle_runner as k
+    for n in ("pool_data.py", "metrics.py"):
+        (tmp_path / n).write_text(f"# {n}\nx = 1\n")
+    nb = k.build_pool_notebook([tmp_path / "pool_data.py", tmp_path / "metrics.py"], "B", n_gpus=2)
+    src = ["".join(c["source"]) for c in nb["cells"]]
+    assert src[1].startswith("%%writefile pool_data.py\n# pool_data.py") and src[2].startswith("%%writefile metrics.py")
+    assert "pip install" in src[0]
+    assert "torchrun" in src[-1] and "'--nproc_per_node', '2'" in src[-1] and "'--run_name', 'B'" in src[-1]
+    assert nb["nbformat"] == 4
+
+
+def test_pool_metadata():
+    import kaggle_runner as k
+    m = k.pool_metadata("me", "ayush-pool-b")
+    assert m["id"] == "me/ayush-pool-b" and m["enable_gpu"] and m["enable_internet"] and m["is_private"]
+    assert "crtproduction/name-that-llm-open-pool" in m["dataset_sources"]
+    assert m["competition_sources"] == ["name-that-llm"] and m["model_sources"] and "id_no" not in m
+
+
+def test_stdout_lines_from_kaggle_log():
+    import kaggle_runner as k
+    log = '[{"stream_name":"stdout","time":1,"data":"hello\\n"}\n,{"stream_name":"stderr","time":2,"data":"warn\\n"}\n,{"stream_name":"stdout","time":3,"data":"a\\nb\\n"}]'
+    assert k.stdout_lines(log) == ["hello", "a", "b"]
+    assert k.stdout_lines("not json\nplain") == ["not json", "plain"]
+
+
+def test_pool_notebook_cells_are_valid_python(tmp_path):
+    import ast, kaggle_runner as k
+    nb = k.build_pool_notebook([], "C", n_gpus=1)
+    ast.parse("".join(nb["cells"][-1]["source"]))
+    assert "--kimi_high_only" in "".join(nb["cells"][-1]["source"])

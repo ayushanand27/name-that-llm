@@ -126,7 +126,7 @@ def cmd_run(a):
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
         return
-    cmd_fetch(argparse.Namespace(ref=md["id"], work=a.work, wait=True))
+    cmd_fetch(argparse.Namespace(ref=md["id"], work=a.work, wait=True, tail=80))
 
 
 def cmd_fetch(a):
@@ -138,7 +138,82 @@ def cmd_fetch(a):
     res = Path(a.work + "_out"); res.mkdir(exist_ok=True)
     sh(["kaggle", "kernels", "output", ref, "-p", str(res)], check=False)
     for f in res.glob("*.log"):
-        print("--- last lines of", f.name); print("".join(f.read_text().splitlines(True)[-60:]))
+        print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
+    for f in sorted(res.rglob("oof_*.npz")):
+        print("--- saved", f.relative_to(res))
+    print(sh(["kaggle", "quota"], check=False))
+
+
+POOL_FILES = ["pool_data.py", "metrics.py", "baseline_tfidf.py", "train_lora.py"]
+POOL_PIP = "transformers==5.24.1 peft==0.22.0 bitsandbytes==0.50.2 accelerate==1.16.0"
+POOL_RUNS = {  # A = official only, B = official + capped pool, C = B with pool kimi kept only at gen_reasoning high
+    "A": "--use_pool 0 --epochs 3",
+    "B": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1",
+    "C": "--use_pool 1 --cap 1500 --kimi_high_only 1 --epochs 1",
+    "probe": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --probe_only 1",
+}
+POOL_FIND = """import glob, os, subprocess, sys
+def find(pattern):
+    hits = sorted(glob.glob('/kaggle/input/**/' + pattern, recursive=True))
+    assert hits, 'not found: ' + pattern
+    return hits[0]
+TRAIN = find('train.csv')
+POOL = find('ntl_open_pool.parquet')
+MODEL = os.path.dirname(find('qwen*/**/config.json'))
+print('train', TRAIN, '| pool', POOL, '| model', MODEL, flush=True)
+subprocess.run(['nvidia-smi', '-L'])
+"""
+
+
+def pool_run_args(run):
+    """Command-line flags for run A, B, C or the speed probe (KeyError for anything else)."""
+    return POOL_RUNS[run]
+
+
+def build_pool_notebook(files, run, n_gpus):
+    """Notebook: install pinned packages, write each repo .py file with %%writefile, then launch train_lora.py
+    with torchrun on n_gpus GPUs for the chosen run."""
+    cells = [code_cell(f"!pip install -q {POOL_PIP}")]
+    cells += [code_cell(f"%%writefile {Path(f).name}\n" + Path(f).read_text()) for f in files]
+    launch = (POOL_FIND +
+              f"cmd = ['torchrun', '--nproc_per_node', '{n_gpus}', 'train_lora.py', '--train_csv', TRAIN, '--pool', POOL,\n"
+              f"       '--model_path', MODEL, '--run_name', '{run}'] + '{pool_run_args(run)}'.split()\n"
+              "print(' '.join(cmd), flush=True)\n"
+              "rc = subprocess.run(cmd).returncode\n"
+              "print('exit code', rc, flush=True)\n"
+              "assert rc in (0, 2), 'training failed'\n")
+    cells.append(code_cell(launch))
+    return {"cells": cells, "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}},
+            "nbformat": 4, "nbformat_minor": 5}
+
+
+def pool_metadata(owner, slug, model="qwen-lm/qwen-3/Transformers/8b-base/1"):
+    """Private GPU notebook with internet (for the pip install), the Open Pool, the competition data and Qwen3-8B."""
+    return {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": f"{slug}.ipynb", "language": "python",
+            "kernel_type": "notebook", "is_private": True, "enable_gpu": True, "enable_internet": True,
+            "machine_shape": "NvidiaTeslaT4", "dataset_sources": ["crtproduction/name-that-llm-open-pool"],
+            "competition_sources": ["name-that-llm"], "model_sources": [model], "kernel_sources": []}
+
+
+def stdout_lines(log_text):
+    """Kaggle's .log is a JSON list of stdout/stderr chunks; return only the stdout lines (plain text passes through)."""
+    try:
+        chunks = json.loads(log_text)
+    except ValueError:
+        return log_text.splitlines()
+    text = "".join(c.get("data", "") for c in chunks if c.get("stream_name") == "stdout")
+    return text.splitlines()
+
+
+def cmd_pool_train(a):
+    owner = kaggle_owner()
+    out = Path(a.work + "_pool"); out.mkdir(exist_ok=True)
+    md = pool_metadata(owner, a.slug)
+    (out / md["code_file"]).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
+    (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
+    print("pushing kernel id:", md["id"], "run", a.run, "flags:", pool_run_args(a.run), flush=True)
+    print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    print(sh(["kaggle", "quota"], check=False))
 
 
 def cmd_probe(a):
@@ -167,6 +242,9 @@ if __name__ == "__main__":
     r = s.add_parser("run"); r.add_argument("--src", required=True); r.add_argument("--slug", required=True)
     r.add_argument("--cells", nargs="+", required=True); r.add_argument("--work", default="kr_work"); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
     f = s.add_parser("fetch"); f.add_argument("--ref", required=True); f.add_argument("--work", default="kr_work")
+    f.add_argument("--tail", type=int, default=80)
     f.add_argument("--wait", action="store_true"); f.set_defaults(f=cmd_fetch)
+    pt = s.add_parser("pool_train"); pt.add_argument("--slug", required=True); pt.add_argument("--run", required=True, choices=sorted(POOL_RUNS))
+    pt.add_argument("--gpus", type=int, default=2); pt.add_argument("--work", default="kr_work"); pt.set_defaults(f=cmd_pool_train)
     pr = s.add_parser("probe"); pr.add_argument("--work", default="kr_work"); pr.set_defaults(f=cmd_probe)
     a = p.parse_args(); a.f(a)
