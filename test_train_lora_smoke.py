@@ -85,3 +85,15 @@ def test_zero_head_starts_at_equal_odds(tmp_path):
     assert torch.all(logits == 0)
     loss = torch.nn.functional.cross_entropy(logits, torch.tensor([0]))
     assert abs(loss.item() - np.log(18)) < 1e-6
+
+
+def test_logged_loss_is_not_scaled_by_grad_accum(tmp_path, capsys):
+    tiny_model(tmp_path / "model"); write_data(tmp_path)
+    args = base_args(tmp_path, "x") + ["--grad_accum", "2", "--batch", "2", "--lr", "1e-12",
+                                       "--probe_only", "1", "--probe_steps", "10"]
+    assert tl.main(args) == 2                   # flat loss at lr 1e-12, so the not-falling guard stops it
+    out = capsys.readouterr().out
+    assert "ABORT: loss not falling" in out
+    line = [l for l in out.splitlines() if l.startswith("first losses")][0]
+    first = float(line.split("[")[1].split(",")[0])
+    assert abs(first - np.log(18)) < 0.01      # zero head: every class equal, loss = ln 18, not 2 x ln 18

@@ -233,6 +233,9 @@ def main(argv=None):
         gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False, **length_grouping(TrainingArguments))
     trainer = Trainer(model=model, args=targs, train_dataset=ds_tr, data_collator=DataCollatorWithPadding(tok),
                       callbacks=[Guard()])
+    # The classifier's loss is a plain mean and ignores Trainer's token count, so let Trainer divide by grad_accum
+    # itself; otherwise loss and gradients come out grad_accum (x GPUs) times too big (probe showed 4 x ln 18).
+    trainer.model_accepts_loss_kwargs = False
     resume = last_checkpoint(a.resume_from) if a.resume_from else last_checkpoint(out / "ckpt")
     if resume:
         say(f"resuming from {resume}")
