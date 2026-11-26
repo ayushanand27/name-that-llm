@@ -35,6 +35,5 @@ About 3.8 h used, about 26.2 h left this week (estimate, B still running). Reset
 - cut256 GLM test dropped: its own feature check failed (re-read features differed 39%).
 - Run C dropped; "final" = B recipe with no holdout.
 - Money is now $0: the paid kimi/qwen/claude generator is replaced by the OpenRouter :free version.
-- head_cv action added (GitHub CPU, free). Artifacts can't be downloaded here, so CPU jobs print numbers only.
-- Daily OpenRouter job not built: no free model matches a label.
+- CPU jobs run on GitHub (free) and print numbers only. Daily OpenRouter job not built: no free model matches a label.
 - Background polling stopped (your no-poll rule); B is checked once when work allows.
