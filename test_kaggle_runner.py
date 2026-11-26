@@ -127,7 +127,4 @@ def test_check_slug_and_inside_refuse_paths(tmp_path):
     for bad in ("../x", "a/b", "AB", "", "x"):
         with pytest.raises(SystemExit):
             k.check_slug(bad)
-    assert k.inside(tmp_path, "nb.ipynb") == (tmp_path / "nb.ipynb").resolve()
-    for bad in ("../nb.ipynb", "sub/nb.ipynb", "/tmp/nb.ipynb"):
-        with pytest.raises(SystemExit):
-            k.inside(tmp_path, bad)
+    assert k.pool_metadata("me", "ayush-pool-b")["code_file"] == "notebook.ipynb"

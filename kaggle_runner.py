@@ -24,21 +24,15 @@ def append_cells(nb, cell_texts):
     return out
 
 
+NB_FILE = "notebook.ipynb"   # fixed name, so nothing a user types ends up in a file path
+
+
 def check_slug(slug):
     """Stop unless the slug looks like a Kaggle notebook name (lowercase letters, digits, dashes), so it
     can't carry a path like ../x into the file we write."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,49}", slug or ""):
         raise SystemExit(f"bad slug {slug!r}: use 3-50 lowercase letters, digits or dashes")
     return slug
-
-
-def inside(folder, name):
-    """Path for `name` in `folder`, refusing anything that would land outside it."""
-    root = Path(folder).resolve()
-    p = (root / name).resolve()
-    if p.parent != root:
-        raise SystemExit(f"refusing to write {name!r} outside {root}")
-    return p
 
 
 def make_metadata(meta, owner, slug, title=None):
@@ -48,7 +42,7 @@ def make_metadata(meta, owner, slug, title=None):
     if not re.fullmatch(r"[a-z0-9-]+", slug):
         raise ValueError("slug must be lowercase letters, digits, dashes")
     m.update(id=f"{owner}/{slug}", title=title or slug.replace("-", " "), enable_gpu=True,
-             enable_internet=False, is_private=True, code_file=f"{slug}.ipynb", language="python", kernel_type="notebook")
+             enable_internet=False, is_private=True, code_file=NB_FILE, language="python", kernel_type="notebook")
     return m
 
 
@@ -126,7 +120,7 @@ def cmd_run(a):
     new = append_cells(json.loads(nb_file.read_text()), [Path(c).read_text() for c in a.cells])
     md = make_metadata(meta, owner, a.slug)
     out = Path(a.work + "_push"); out.mkdir(exist_ok=True)
-    inside(out, md["code_file"]).write_text(json.dumps(new))
+    (out / NB_FILE).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
     print("pushing kernel id:", md["id"], flush=True)
@@ -208,7 +202,7 @@ def build_pool_notebook(files, run, n_gpus):
 
 def pool_metadata(owner, slug, model="qwen-lm/qwen-3/Transformers/8b-base/1"):
     """Private GPU notebook with internet (for the pip install), the Open Pool, the competition data and Qwen3-8B."""
-    return {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": f"{slug}.ipynb", "language": "python",
+    return {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": NB_FILE, "language": "python",
             "kernel_type": "notebook", "is_private": True, "enable_gpu": True, "enable_internet": True,
             "machine_shape": "NvidiaTeslaT4", "dataset_sources": ["crtproduction/name-that-llm-open-pool"],
             "competition_sources": ["name-that-llm"], "model_sources": [model], "kernel_sources": []}
@@ -239,7 +233,7 @@ def cmd_pool_train(a):
     owner = kaggle_owner()
     out = Path(a.work + "_pool"); out.mkdir(exist_ok=True)
     md = pool_metadata(owner, check_slug(a.slug))
-    inside(out, md["code_file"]).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
+    (out / NB_FILE).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("pushing kernel id:", md["id"], "run", a.run, "flags:", pool_run_args(a.run), flush=True)
     print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
