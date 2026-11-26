@@ -75,3 +75,13 @@ def test_probe_only_reports_speed_losses_and_scoring_time(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "speed probe:" in out and "first losses" in out and "min for 4,000" in out
     assert not (tmp_path / "out" / "adapter").exists()
+
+
+def test_zero_head_starts_at_equal_odds(tmp_path):
+    from transformers import AutoModelForSequenceClassification
+    tiny_model(tmp_path / "model")
+    m = tl.zero_head(AutoModelForSequenceClassification.from_pretrained(tmp_path / "model"))
+    logits = m(input_ids=torch.tensor([[3, 4, 5]])).logits
+    assert torch.all(logits == 0)
+    loss = torch.nn.functional.cross_entropy(logits, torch.tensor([0]))
+    assert abs(loss.item() - np.log(18)) < 1e-6

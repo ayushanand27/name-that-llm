@@ -31,6 +31,19 @@ def scoring_minutes(seconds, n_scored, n_target=4000):
     return seconds / n_scored * n_target / 60
 
 
+def zero_head(model):
+    """Set the new classifier head to zero so every class starts at equal odds (loss = ln 18 ~ 2.89), not at a
+    random large loss: Qwen's last hidden state is large, so a random head starts near loss 45."""
+    head = model.score
+    if not head.weight.dtype.is_floating_point:      # a 4-bit packed head can't be zeroed this way; leave it
+        print("head is quantized; not zeroed", flush=True)
+        return model
+    head.weight.data.zero_()
+    if getattr(head, "bias", None) is not None:
+        head.bias.data.zero_()
+    return model
+
+
 def out_of_time(elapsed_s, budget_h):
     """True once the run has used its wall-clock budget, so it saves and stops before Kaggle's 12 h cut."""
     return elapsed_s > budget_h * 3600
@@ -157,6 +170,7 @@ def main(argv=None):
     else:
         model = AutoModelForSequenceClassification.from_pretrained(a.model_path, num_labels=len(labels))
         model.config.pad_token_id = tok.pad_token_id
+    zero_head(model)
     lcfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=a.lora_r, lora_alpha=2 * a.lora_r, lora_dropout=0.05,
                       target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     model = get_peft_model(model, lcfg)
