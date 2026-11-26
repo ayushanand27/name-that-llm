@@ -91,3 +91,8 @@ def test_build_dataset_no_leak_and_labels():
 def test_build_dataset_official_only():
     train, hold, _ = pdm.build_dataset(fake_official(), fake_pool(), pdm.Config(use_pool=False, seed=0))
     assert train.is_official.all()
+
+
+def test_holdout_frac_zero_builds_no_holdout():
+    train, hold, _ = pdm.build_dataset(fake_official(), fake_pool(), pdm.Config(use_pool=True, cap=5, holdout_frac=0.0, seed=0))
+    assert len(hold) == 0 and int(train.is_official.sum()) == len(fake_official())

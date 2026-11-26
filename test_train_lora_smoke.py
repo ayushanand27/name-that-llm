@@ -51,3 +51,27 @@ def test_main_aborts_when_estimate_too_high(tmp_path):
             "--epochs", "3", "--quant_4bit", "0"]
     assert tl.main(args) == 2
     assert not (tmp_path / "out" / "oof_A.npz").exists()
+
+
+def base_args(tmp_path, run):
+    return ["--train_csv", str(tmp_path / "train.csv"), "--pool", str(tmp_path / "pool.parquet"),
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", run,
+            "--cap", "5", "--batch", "4", "--grad_accum", "1", "--save_steps", "20", "--probe_steps", "3",
+            "--lr", "5e-3", "--epochs", "1", "--quant_4bit", "0"]
+
+
+def test_final_retrain_has_no_holdout(tmp_path, capsys):
+    tiny_model(tmp_path / "model"); write_data(tmp_path)
+    assert tl.main(base_args(tmp_path, "final") + ["--holdout_frac", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "holdout rows 0" in out and "official 180" in out and "no holdout (final retrain)" in out
+    assert (tmp_path / "out" / "adapter" / "adapter_config.json").exists()
+    assert not (tmp_path / "out" / "oof_final.npz").exists()
+
+
+def test_probe_only_reports_speed_losses_and_scoring_time(tmp_path, capsys):
+    tiny_model(tmp_path / "model"); write_data(tmp_path)
+    assert tl.main(base_args(tmp_path, "probe") + ["--probe_only", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "speed probe:" in out and "first losses" in out and "min for 4,000" in out
+    assert not (tmp_path / "out" / "adapter").exists()
