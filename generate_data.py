@@ -1,16 +1,20 @@
-"""Generate extra passages for chosen labels from OpenAI-compatible chat APIs, with a hard spend cap.
+"""Generate extra passages for chosen labels from OpenRouter's free models only ($0), within the daily free limit.
 
-Dry run by default: prints how many calls and what they should cost, and makes no network calls.
-Add --execute to really call the APIs. The API key is read only from the environment variable named in the
-config ("key_env"); it is never printed, logged or written. Each passage is appended to a JSONL as it arrives,
-so a rerun skips the (prompt_id, label, sample_idx) rows that are already done.
+Dry run by default: prints how many calls it would make, and makes no network calls at all.
+Add --execute to really call OpenRouter. Only model ids ending in ":free" are accepted, so no call can cost money.
+The API key is read only from the environment variable named in the config ("key_env", e.g.
+OPENROUTER_API_KEY); it is never printed, logged or written. With --execute:
+- the daily free budget is read from GET {base_url}/key (free_model_daily_requests.remaining) and the run
+  stops when it reaches --keep (default 0); it is re-read every 10 calls;
+- calls are paced to at most 15 per minute; 429 and 5xx are retried with growing waits;
+- each reply is appended to the JSONL as it arrives, so a rerun (the next day) skips the
+  (prompt_id, label, sample_idx) rows already done;
+- the model that actually served the reply is logged, and a row whose served model is not the label's model
+  is kept but marked ok=false (reject="served by another model"), so it never enters training.
 
 Config (JSON):
-{"key_env": "MY_KEY_ENV",                              # default env var for every label
- "labels": {"kimi-k3": {"base_url": "https://.../v1", "model": "...", "reasoning": "high",
-                        "price_in_per_mtok": 0.6, "price_out_per_mtok": 2.5,   # USD per million tokens
-                        "est_in_tokens": 120, "est_out_tokens": 600,          # for the dry-run estimate
-                        "key_env": "OPTIONAL_PER_LABEL_ENV", "max_tokens": 2000}}}
+{"base_url": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY",
+ "labels": {"<one of the 18 labels>": {"model": "<vendor>/<model>:free", "max_tokens": 600}}}
 """
 import argparse
 import csv
@@ -23,138 +27,137 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-MIN_WORDS, MAX_WORDS = 40, 250          # the competition's passage length
+MIN_WORDS, MAX_WORDS = 40, 250
+PER_MINUTE = 15
+RECHECK_EVERY = 10
 RETRY_CODES = {429, 500, 502, 503, 504}
 
 
 def word_ok(text):
-    """True if the passage has 40-250 words, like the competition passages."""
-    return MIN_WORDS <= len(text.split()) <= MAX_WORDS
+    return MIN_WORDS <= len(str(text).split()) <= MAX_WORDS
 
 
-def cost_of(usage, cfg):
-    """USD for one call, from the token counts the API returned and the config's per-million prices."""
-    return (usage.get("prompt_tokens", 0) * cfg["price_in_per_mtok"]
-            + usage.get("completion_tokens", 0) * cfg["price_out_per_mtok"]) / 1e6
-
-
-def estimate_call(cfg):
-    """Expected USD for one call before any response is seen, from est_in_tokens / est_out_tokens."""
-    return cost_of({"prompt_tokens": cfg.get("est_in_tokens", 150),
-                    "completion_tokens": cfg.get("est_out_tokens", 600)}, cfg)
+def same_model(requested, served):
+    """Served id must be the requested id, give or take the ':free' suffix."""
+    if not served:
+        return False
+    strip = lambda m: m.removesuffix(":free").strip().lower()
+    return strip(requested) == strip(served)
 
 
 def load_prompts(path):
-    """[(prompt_id, prompt)] from a CSV with columns prompt_id, prompt."""
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     if not rows or not {"prompt_id", "prompt"} <= set(rows[0]):
-        raise SystemExit(f"{path} needs columns prompt_id and prompt")
-    return [(r["prompt_id"], r["prompt"]) for r in rows]
+        raise SystemExit(f"{path}: needs columns prompt_id, prompt")
+    return rows
 
 
 def plan(prompts, labels, n):
-    """Every (prompt_id, prompt, label, sample_idx) wanted: n samples per prompt per label."""
-    return [(pid, text, lab, i) for lab in labels for pid, text in prompts for i in range(n)]
+    return [(p["prompt_id"], p["prompt"], lab, k) for p in prompts for lab in labels for k in range(n)]
 
 
-def read_done(out_path):
-    """Keys already in the output file, and the USD already spent on them."""
-    done, spent = set(), 0.0
-    if Path(out_path).exists():
-        for line in Path(out_path).read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                r = json.loads(line)
-                done.add((r["prompt_id"], r["label"], r["sample_idx"]))
-                spent += r.get("cost_usd", 0.0)
-    return done, spent
+def read_done(out):
+    if not Path(out).exists():
+        return set()
+    done = set()
+    for line in Path(out).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            r = json.loads(line)
+            done.add((r["prompt_id"], r["label"], r["sample_idx"]))
+    return done
 
 
-def scrub(msg, key):
-    """Error text with the key masked, in case a server echoes it back."""
-    return str(msg).replace(key, "***") if key else str(msg)
+def _request(url, key, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method="GET" if body is None else "POST")
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    return req
 
 
-def call_chat(cfg, key, prompt, retries=5, timeout=120):
-    """One chat completion. Retries 429 and 5xx with growing waits (honours Retry-After). Returns (text, usage)."""
-    body = {"model": cfg["model"], "messages": [{"role": "user", "content": prompt}]}
-    if cfg.get("reasoning"):
-        body["reasoning_effort"] = cfg["reasoning"]
-    if cfg.get("max_tokens"):
-        body["max_tokens"] = cfg["max_tokens"]
-    req = urllib.request.Request(cfg["base_url"].rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
-                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+def http_json(url, key, body=None, retries=5, timeout=120):
+    """GET (body None) or POST; retries 429/5xx with max(Retry-After, 2*2^attempt) seconds. Never shows the key."""
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                out = json.loads(r.read())
-            return out["choices"][0]["message"]["content"] or "", out.get("usage", {})
+            with urllib.request.urlopen(_request(url, key, body), timeout=timeout) as r:
+                return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            if e.code not in RETRY_CODES or attempt == retries:
-                raise RuntimeError(f"HTTP {e.code} from {cfg['base_url']}") from None
-            wait = max(float(e.headers.get("Retry-After") or 0), 2.0 * 2 ** attempt)
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt == retries:
-                raise RuntimeError(scrub(f"network error: {e}", key)) from None
-            wait = 2.0 * 2 ** attempt
-        time.sleep(wait)
+            if e.code in RETRY_CODES and attempt < retries:
+                wait = max(float(e.headers.get("Retry-After") or 0), 2.0 * 2 ** attempt)
+                print(f"  HTTP {e.code}, waiting {wait:.0f}s (try {attempt + 1}/{retries})", flush=True)
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"HTTP {e.code} from {url.split('?')[0]}") from None
+    raise RuntimeError("unreachable")
+
+
+def daily_remaining(base_url, key):
+    d = http_json(base_url.rstrip("/") + "/key", key)
+    return int(d["data"]["free_model_daily_requests"]["remaining"])
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--prompts", required=True); ap.add_argument("--config", required=True)
-    ap.add_argument("--out", required=True); ap.add_argument("--n", type=int, default=1, help="samples per prompt")
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--prompts", required=True)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--n", type=int, default=1, help="samples per prompt and label")
     ap.add_argument("--labels", nargs="*", help="subset of config labels (default: all)")
-    ap.add_argument("--max_usd", type=float, default=5.0, help="hard cap on total spend in the output file")
-    ap.add_argument("--execute", action="store_true", help="really call the APIs (default is a dry run)")
+    ap.add_argument("--keep", type=int, default=0, help="leave this many free requests unused today")
+    ap.add_argument("--execute", action="store_true", help="really call OpenRouter (default is a dry run)")
     a = ap.parse_args(argv)
-
     conf = json.loads(Path(a.config).read_text())
     labels = a.labels or list(conf["labels"])
-    unknown = set(labels) - set(conf["labels"])
-    if unknown:
-        raise SystemExit(f"labels not in config: {sorted(unknown)}")
-    jobs = plan(load_prompts(a.prompts), labels, a.n)
-    done, spent = read_done(a.out)
-    todo = [j for j in jobs if (j[0], j[2], j[3]) not in done]
-    est = sum(estimate_call(conf["labels"][j[2]]) for j in todo)
-    print(f"{len(todo)} calls to make ({len(jobs) - len(todo)} already done), estimated ${est:.4f}; "
-          f"already spent ${spent:.4f}; cap ${a.max_usd:.2f}")
-    if not a.execute:
-        print("dry run: no calls made. Add --execute to run.")
-        return 0
-
-    keys = {}
     for lab in labels:
-        env = conf["labels"][lab].get("key_env") or conf.get("key_env")
-        if not env or not os.environ.get(env):
-            raise SystemExit(f"API key missing: set the environment variable {env or '(key_env not in config)'}")
-        keys[lab] = os.environ[env]
-
-    made = 0
+        if not conf["labels"][lab]["model"].endswith(":free"):
+            raise SystemExit(f"{lab}: model must end in ':free' (money is $0, paid models are refused)")
+    todo = [t for t in plan(load_prompts(a.prompts), labels, a.n) if (t[0], t[2], t[3]) not in read_done(a.out)]
+    print(f"{len(todo)} calls left to make ({len(labels)} labels), free models only, cost $0")
+    if not a.execute:
+        print("dry run: no network calls made. Add --execute to run (at most the day's free requests, 15 per minute).")
+        return 0
+    env = conf.get("key_env", "OPENROUTER_API_KEY")
+    key = os.environ.get(env)
+    if not key:
+        raise SystemExit(f"API key missing: set the environment variable {env}")
+    base = conf.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
+    left = daily_remaining(base, key)
+    print(f"free requests left today: {left} (keeping {a.keep})", flush=True)
+    made, last = 0, None
     with open(a.out, "a", encoding="utf-8") as f:
-        for pid, prompt, lab, i in todo:
-            cfg = conf["labels"][lab]
-            if spent + estimate_call(cfg) > a.max_usd:
-                print(f"spend cap: stopping at ${spent:.4f}; the next call (about ${estimate_call(cfg):.4f}) "
-                      f"would pass ${a.max_usd:.2f}")
+        for pid, prompt, lab, k in todo:
+            if made and made % RECHECK_EVERY == 0:
+                left = daily_remaining(base, key)
+            if left <= a.keep:
+                print(f"daily free budget reached after {made} calls; run again tomorrow to resume", flush=True)
                 break
+            if last is not None:
+                time.sleep(max(0.0, 60.0 / PER_MINUTE - (time.monotonic() - last)))
+            cfg = conf["labels"][lab]
+            body = {"model": cfg["model"], "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": cfg.get("max_tokens", 600)}
             try:
-                text, usage = call_chat(cfg, keys[lab], prompt)
+                last = time.monotonic()
+                r = http_json(base + "/chat/completions", key, body)
             except RuntimeError as e:
-                print(f"skipped {pid}/{lab}/{i}: {scrub(e, keys[lab])}", file=sys.stderr)
-                continue
-            cost = cost_of(usage, cfg)
-            spent += cost
-            row = {"prompt_id": pid, "label": lab, "sample_idx": i, "model": cfg["model"],
-                   "reasoning": cfg.get("reasoning"), "date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                   "prompt_tokens": usage.get("prompt_tokens", 0), "completion_tokens": usage.get("completion_tokens", 0),
-                   "cost_usd": round(cost, 6), "words": len(text.split()), "ok": word_ok(text), "text": text}
-            f.write(json.dumps(row, ensure_ascii=False) + "\n"); f.flush()
-            made += 1
-    print(f"made {made} calls; total spent in {a.out}: ${spent:.4f}")
+                print(f"  {pid} {lab} #{k}: {e}; stopping", flush=True)
+                break
+            made += 1; left -= 1
+            text = (r.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            served = r.get("model")
+            reject = None if same_model(cfg["model"], served) else "served by another model"
+            if reject is None and not word_ok(text):
+                reject = f"words outside {MIN_WORDS}-{MAX_WORDS}"
+            u = r.get("usage") or {}
+            row = {"prompt_id": pid, "label": lab, "sample_idx": k, "model": cfg["model"], "served_model": served,
+                   "provider": r.get("provider"), "date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "prompt_tokens": u.get("prompt_tokens"), "completion_tokens": u.get("completion_tokens"),
+                   "words": len(text.split()), "ok": reject is None, "reject": reject, "text": text}
+            f.write(json.dumps(row) + "\n"); f.flush()
+    print(f"made {made} calls this run", flush=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

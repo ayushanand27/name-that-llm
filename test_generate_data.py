@@ -1,4 +1,4 @@
-"""generate_data.py against a fake local OpenAI-style server. No real network, no real keys."""
+"""generate_data.py (OpenRouter :free) against a fake local server. No real network, no real keys, $0."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -7,36 +7,49 @@ import pytest
 
 import generate_data as gd
 
-KEY = "sk-test-SECRET-123456"
+KEY = "sk-or-test-SECRET-123456"
 TEXT = " ".join(["word"] * 60)          # 60 words, inside 40-250
+MODEL = "z-ai/glm-5.3:free"
 
 
 class Fake:
-    """Local server: records each request; `script` is a list of status codes to return first (e.g. [429])."""
+    """Local OpenRouter stand-in. `script` = status codes to return first; `remaining` = daily free requests left;
+    `served` = model id the server says served the reply."""
     def __init__(self):
         self.calls, self.auth, self.script, self.text = [], [], [], TEXT
+        self.remaining, self.served, self.key_reads = 50, "z-ai/glm-5.3", 0
         fake = self
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
+            def _send(self, code, obj, extra=()):
+                data = json.dumps(obj).encode()
+                self.send_response(code); self.send_header("Content-Type", "application/json")
+                for k, v in extra:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
+            def do_GET(self):
+                fake.auth.append(self.headers.get("Authorization")); fake.key_reads += 1
+                self._send(200, {"data": {"free_model_daily_requests": {"used": 50 - fake.remaining, "limit": 50,
+                                                                         "remaining": fake.remaining}}})
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.calls.append(body); fake.auth.append(self.headers.get("Authorization"))
                 code = fake.script.pop(0) if fake.script else 200
                 if code != 200:
-                    self.send_response(code); self.send_header("Retry-After", "0"); self.end_headers()
-                    self.wfile.write(b'{"error":"slow down"}'); return
-                out = {"choices": [{"message": {"content": fake.text}}],
-                       "usage": {"prompt_tokens": 100, "completion_tokens": 200}}
-                data = json.dumps(out).encode()
-                self.send_response(200); self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+                    return self._send(code, {"error": "slow down"}, [("Retry-After", "0")])
+                fake.remaining -= 1
+                self._send(200, {"model": fake.served, "provider": "SomeHost",
+                                 "choices": [{"message": {"content": fake.text}}],
+                                 "usage": {"prompt_tokens": 100, "completion_tokens": 200}})
 
         self.srv = HTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.srv.server_port}/v1"
+        self.url = f"http://127.0.0.1:{self.srv.server_port}/api/v1"
 
     def close(self):
         self.srv.shutdown()
@@ -47,103 +60,141 @@ def fake():
     f = Fake(); yield f; f.close()
 
 
-def setup(tmp_path, url, prompts=2, price_in=1.0, price_out=4.0):
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    waits = []
+    monkeypatch.setattr(gd.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def setup(tmp_path, url, prompts=2, model=MODEL):
     (tmp_path / "prompts.csv").write_text("prompt_id,prompt\n" + "".join(f"p{i},Write about topic {i}\n" for i in range(prompts)))
-    cfg = {"key_env": "FAKE_API_KEY",
-           "labels": {"kimi-k3": {"base_url": url, "model": "kimi-k3", "reasoning": "high",
-                                  "price_in_per_mtok": price_in, "price_out_per_mtok": price_out,
-                                  "est_in_tokens": 100, "est_out_tokens": 200}}}
+    cfg = {"base_url": url, "key_env": "FAKE_OR_KEY", "labels": {"glm-5.3": {"model": model}}}
     (tmp_path / "cfg.json").write_text(json.dumps(cfg))
     return ["--prompts", str(tmp_path / "prompts.csv"), "--config", str(tmp_path / "cfg.json"),
             "--out", str(tmp_path / "out.jsonl")]
 
 
-# cost per call at these prices: 100 * 1/1e6 + 200 * 4/1e6 = 0.0009 USD
-
-def test_cost_of_usage():
-    cfg = {"price_in_per_mtok": 1.0, "price_out_per_mtok": 4.0}
-    assert gd.cost_of({"prompt_tokens": 100, "completion_tokens": 200}, cfg) == pytest.approx(0.0009)
+def rows(tmp_path):
+    p = tmp_path / "out.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
 
 
 def test_word_count_rule():
     assert gd.word_ok(TEXT) and not gd.word_ok("too short") and not gd.word_ok(" ".join(["w"] * 251))
 
 
-def test_dry_run_makes_no_calls_and_prints_estimate(tmp_path, fake, monkeypatch, capsys):
-    monkeypatch.delenv("FAKE_API_KEY", raising=False)          # dry run needs no key
-    assert gd.main(setup(tmp_path, fake.url) + ["--n", "3"]) == 0
-    out = capsys.readouterr().out
-    assert fake.calls == [] and not (tmp_path / "out.jsonl").exists()
-    assert "6 calls" in out and "0.0054" in out and "dry run" in out.lower()
+def test_same_model_rule():
+    assert gd.same_model("z-ai/glm-5.3:free", "z-ai/glm-5.3")
+    assert gd.same_model("z-ai/glm-5.3:free", "z-ai/glm-5.3:free")
+    assert not gd.same_model("z-ai/glm-5.3:free", "z-ai/glm-5.3-flash")
+    assert not gd.same_model("z-ai/glm-5.3:free", None)
 
 
-def test_execute_without_key_fails_clearly(tmp_path, fake, monkeypatch):
-    monkeypatch.delenv("FAKE_API_KEY", raising=False)
-    with pytest.raises(SystemExit, match="FAKE_API_KEY"):
-        gd.main(setup(tmp_path, fake.url) + ["--n", "1", "--execute"])
+def test_only_free_models_are_allowed(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    with pytest.raises(SystemExit, match=":free"):
+        gd.main(setup(tmp_path, fake.url, model="z-ai/glm-5.3") + ["--execute"])
     assert fake.calls == []
 
 
-def test_execute_writes_rows_and_sends_reasoning(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    assert gd.main(setup(tmp_path, fake.url) + ["--n", "1", "--execute", "--max_usd", "1"]) == 0
-    rows = [json.loads(l) for l in (tmp_path / "out.jsonl").read_text().splitlines()]
-    assert len(rows) == 2 and rows[0]["label"] == "kimi-k3" and rows[0]["reasoning"] == "high"
-    assert rows[0]["prompt_tokens"] == 100 and rows[0]["cost_usd"] == pytest.approx(0.0009) and rows[0]["ok"]
-    assert {"prompt_id", "sample_idx", "model", "date", "text", "words"} <= set(rows[0])
-    assert fake.calls[0]["reasoning_effort"] == "high" and fake.auth[0] == f"Bearer {KEY}"
+def test_dry_run_makes_no_network_calls(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.delenv("FAKE_OR_KEY", raising=False)          # dry run needs no key
+    assert gd.main(setup(tmp_path, fake.url) + ["--n", "3"]) == 0
+    out = capsys.readouterr().out
+    assert fake.calls == [] and fake.key_reads == 0 and not (tmp_path / "out.jsonl").exists()
+    assert "6 calls" in out and "dry run" in out.lower() and "$0" in out
 
 
-def test_spend_cap_stops_before_going_over(tmp_path, fake, monkeypatch, capsys):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    # 5 prompts x 1 = 5 calls of 0.0009; cap 0.002 allows 2 (0.0018), a 3rd would make 0.0027
-    assert gd.main(setup(tmp_path, fake.url, prompts=5) + ["--n", "1", "--execute", "--max_usd", "0.002"]) == 0
+def test_execute_without_key_fails_clearly(tmp_path, fake, monkeypatch):
+    monkeypatch.delenv("FAKE_OR_KEY", raising=False)
+    with pytest.raises(SystemExit, match="FAKE_OR_KEY"):
+        gd.main(setup(tmp_path, fake.url) + ["--execute"])
+    assert fake.calls == []
+
+
+def test_execute_writes_rows_with_served_model(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    assert gd.main(setup(tmp_path, fake.url) + ["--execute"]) == 0
+    r = rows(tmp_path)
+    assert len(r) == 2 and all(x["ok"] for x in r)
+    assert {x["served_model"] for x in r} == {"z-ai/glm-5.3"} and r[0]["provider"] == "SomeHost"
+    assert {"prompt_id", "label", "sample_idx", "model", "date", "prompt_tokens", "completion_tokens", "words"} <= set(r[0])
+
+
+def test_stops_when_daily_budget_is_zero(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    fake.remaining = 0
+    assert gd.main(setup(tmp_path, fake.url) + ["--execute"]) == 0
+    assert fake.calls == [] and "daily" in capsys.readouterr().out
+
+
+def test_stops_when_budget_runs_out_mid_run(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    fake.remaining = 2
+    gd.main(setup(tmp_path, fake.url, prompts=5) + ["--execute"])
     assert len(fake.calls) == 2
-    assert "spend cap" in capsys.readouterr().out
 
 
-def test_resume_skips_finished_rows(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    args = setup(tmp_path, fake.url) + ["--n", "2", "--execute", "--max_usd", "1"]
-    gd.main(args); assert len(fake.calls) == 4
-    gd.main(args); assert len(fake.calls) == 4            # nothing new
-    gd.main(setup(tmp_path, fake.url) + ["--n", "3", "--execute", "--max_usd", "1"])
-    assert len(fake.calls) == 6                            # only sample_idx 2 for each prompt
+def test_keep_spare_requests(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    fake.remaining = 3
+    gd.main(setup(tmp_path, fake.url, prompts=5) + ["--execute", "--keep", "2"])
+    assert len(fake.calls) == 1
 
 
-def test_cap_counts_spend_already_in_the_file(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    gd.main(setup(tmp_path, fake.url, prompts=2) + ["--n", "1", "--execute", "--max_usd", "1"])
-    gd.main(setup(tmp_path, fake.url, prompts=4) + ["--n", "1", "--execute", "--max_usd", "0.002"])
-    assert len(fake.calls) == 2                            # 0.0018 already spent, the next call would pass 0.002
+def test_paces_at_most_15_per_minute(tmp_path, fake, monkeypatch, no_sleep):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    clock = [1000.0]
+    monkeypatch.setattr(gd.time, "monotonic", lambda: clock[0])
+    gd.main(setup(tmp_path, fake.url, prompts=3) + ["--execute"])
+    assert len(fake.calls) == 3
+    assert sum(1 for w in no_sleep if w >= 4.0 - 1e-9) >= 2     # 60/15 = 4 s between calls
 
 
-def test_429_is_retried_with_backoff(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    waits = []
-    monkeypatch.setattr(gd.time, "sleep", lambda s: waits.append(s))
+def test_wrong_served_model_is_rejected(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    fake.served = "z-ai/glm-5.3-flash"
+    gd.main(setup(tmp_path, fake.url) + ["--execute"])
+    r = rows(tmp_path)
+    assert len(r) == 2 and not any(x["ok"] for x in r) and r[0]["reject"] == "served by another model"
+
+
+def test_resume_skips_done_rows(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    args = setup(tmp_path, fake.url, prompts=3)
+    fake.remaining = 2
+    gd.main(args + ["--execute"])
+    assert len(rows(tmp_path)) == 2
+    fake.remaining = 50; n = len(fake.calls)
+    gd.main(args + ["--execute"])
+    assert len(fake.calls) == n + 1 and len(rows(tmp_path)) == 3
+    keys = {(x["prompt_id"], x["label"], x["sample_idx"]) for x in rows(tmp_path)}
+    assert len(keys) == 3
+
+
+def test_429_is_retried_with_growing_waits(tmp_path, fake, monkeypatch, no_sleep):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
     fake.script = [429, 429]
-    assert gd.main(setup(tmp_path, fake.url, prompts=1) + ["--n", "1", "--execute", "--max_usd", "1"]) == 0
-    assert len(fake.calls) == 3 and len(waits) == 2 and waits[1] > waits[0]
-    assert len((tmp_path / "out.jsonl").read_text().splitlines()) == 1
+    gd.main(setup(tmp_path, fake.url, prompts=1) + ["--execute"])
+    assert len(fake.calls) == 3 and len(rows(tmp_path)) == 1
+    assert len(no_sleep) == 2 and no_sleep[1] > no_sleep[0] > 0   # one prompt, so these are both backoff waits
 
 
-def test_out_of_range_text_is_marked_not_ok(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
+def test_out_of_range_text_is_kept_but_marked(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
     fake.text = "far too short"
-    gd.main(setup(tmp_path, fake.url, prompts=1) + ["--n", "1", "--execute", "--max_usd", "1"])
-    row = json.loads((tmp_path / "out.jsonl").read_text())
-    assert row["ok"] is False and row["words"] == 3
+    gd.main(setup(tmp_path, fake.url, prompts=1) + ["--execute"])
+    r = rows(tmp_path)[0]
+    assert r["ok"] is False and r["words"] == 3 and r["reject"] == "words outside 40-250"
 
 
-def test_key_never_written_or_printed(tmp_path, fake, monkeypatch, capsys):
-    monkeypatch.setenv("FAKE_API_KEY", KEY)
-    monkeypatch.setattr(gd.time, "sleep", lambda s: None)
-    fake.script = [500, 500, 500, 500, 500, 500]           # fails every retry: error path must not leak the key
-    gd.main(setup(tmp_path, fake.url, prompts=1) + ["--n", "1", "--execute", "--max_usd", "1"])
-    fake.script = []
-    gd.main(setup(tmp_path, fake.url, prompts=1) + ["--n", "1", "--execute", "--max_usd", "1"])
-    printed = capsys.readouterr()
-    for f in tmp_path.iterdir():
-        assert KEY not in f.read_text() and "Bearer" not in f.read_text()
-    assert KEY not in printed.out + printed.err
+def test_key_never_appears_in_outputs(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_OR_KEY", KEY)
+    fake.script = [500]
+    gd.main(setup(tmp_path, fake.url) + ["--execute"])
+    out = capsys.readouterr()
+    files = "".join(p.read_text() for p in tmp_path.iterdir() if p.is_file())
+    for blob in (out.out, out.err, files):
+        assert KEY not in blob and "Bearer" not in blob and "Authorization" not in blob
+    assert all(a == f"Bearer {KEY}" for a in fake.auth)          # it was sent, only to the server
