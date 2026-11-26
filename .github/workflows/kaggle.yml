@@ -14,7 +14,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      - run: pip install kaggle six pytest && python -m pytest -q test_kaggle_runner.py
+      - run: |
+          pip install --only-binary=:all: kaggle==2.2.5 six==1.17.0 pytest==9.0.1
+          python -m pytest -q test_kaggle_runner.py
       - name: check secrets are set
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
