@@ -58,3 +58,73 @@ def test_metadata_drops_source_id_no():
     import kaggle_runner as k
     m = k.make_metadata({"id": "rohan/x", "id_no": 12345, "dataset_sources": ["a/b"]}, "me", "my-run")
     assert "id_no" not in m and m["id"] == "me/my-run" and m["dataset_sources"] == ["a/b"]
+
+
+def test_pool_run_args():
+    import kaggle_runner as k
+    assert "--use_pool 0" in k.pool_run_args("A") and "--epochs 3" in k.pool_run_args("A")
+    b = k.pool_run_args("B")
+    assert "--use_pool 1" in b and "--cap 1500" in b and "--kimi_high_only 0" in b
+    assert "--holdout_frac 0" in k.pool_run_args("final") and "--use_pool 1" in k.pool_run_args("final")
+    assert "C" not in k.POOL_RUNS
+    assert "--probe_only 1" in k.pool_run_args("probe") and "--use_pool 1" in k.pool_run_args("probe")
+    import pytest
+    with pytest.raises(KeyError):
+        k.pool_run_args("Z")
+
+
+def test_build_pool_notebook(tmp_path):
+    import kaggle_runner as k
+    for n in ("pool_data.py", "metrics.py"):
+        (tmp_path / n).write_text(f"# {n}\nx = 1\n")
+    nb = k.build_pool_notebook([tmp_path / "pool_data.py", tmp_path / "metrics.py"], "B", n_gpus=2)
+    src = ["".join(c["source"]) for c in nb["cells"]]
+    assert src[1].startswith("%%writefile pool_data.py\n# pool_data.py") and src[2].startswith("%%writefile metrics.py")
+    assert "pip install" in src[0]
+    assert "torchrun" in src[-1] and "'--nproc_per_node', '2'" in src[-1] and "'--run_name', 'B'" in src[-1]
+    assert nb["nbformat"] == 4
+
+
+def test_pool_metadata():
+    import kaggle_runner as k
+    m = k.pool_metadata("me", "ayush-pool-b")
+    assert m["id"] == "me/ayush-pool-b" and m["enable_gpu"] and m["enable_internet"] and m["is_private"]
+    assert "crtproduction/name-that-llm-open-pool" in m["dataset_sources"]
+    assert m["competition_sources"] == ["name-that-llm"] and m["model_sources"] and "id_no" not in m
+
+
+def test_stdout_lines_from_kaggle_log():
+    import kaggle_runner as k
+    log = '[{"stream_name":"stdout","time":1,"data":"hello\\n"}\n,{"stream_name":"stderr","time":2,"data":"warn\\n"}\n,{"stream_name":"stdout","time":3,"data":"a\\nb\\n"}]'
+    assert k.stdout_lines(log) == ["hello", "a", "b"]
+    assert k.stdout_lines("not json\nplain") == ["not json", "plain"]
+
+
+def test_pool_notebook_cells_are_valid_python(tmp_path):
+    import ast, kaggle_runner as k
+    nb = k.build_pool_notebook([], "final", n_gpus=1)
+    ast.parse("".join(nb["cells"][-1]["source"]))
+    assert "--holdout_frac" in "".join(nb["cells"][-1]["source"])
+
+
+def test_error_lines_keep_traceback_only():
+    import kaggle_runner as k
+    log = ('[{"stream_name":"stdout","time":1,"data":"Error in stdout is ignored\\n"}\n,'
+           '{"stream_name":"stderr","time":2,"data":"warn: slow\\nTraceback (most recent call last):\\n  File \\"x.py\\", line 1\\nValueError: bad\\n"}]')
+    assert k.error_lines(log) == ["Traceback (most recent call last):", '  File "x.py", line 1', "ValueError: bad"]
+    assert k.error_lines("not json") == []
+
+
+def test_launch_cell_needs_exit_code_zero():
+    import kaggle_runner as k
+    src = "".join(k.build_pool_notebook([], "B", n_gpus=2)["cells"][-1]["source"])
+    assert "assert rc == 0" in src
+
+
+def test_check_slug_and_inside_refuse_paths(tmp_path):
+    import pytest, kaggle_runner as k
+    assert k.check_slug("ayush-pool-b") == "ayush-pool-b"
+    for bad in ("../x", "a/b", "AB", "", "x"):
+        with pytest.raises(SystemExit):
+            k.check_slug(bad)
+    assert k.pool_metadata("me", "ayush-pool-b")["code_file"] == "notebook.ipynb"

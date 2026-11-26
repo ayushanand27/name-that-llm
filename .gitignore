@@ -2,3 +2,6 @@
 *_push/
 *_out/
 kaggle.json
+__pycache__/
+*.pyc
+kr_work*/

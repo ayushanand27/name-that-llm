@@ -24,6 +24,18 @@ def append_cells(nb, cell_texts):
     return out
 
 
+WORK = "kr_work"            # fixed local work folder (it is in .gitignore as *_work/)
+NB_FILE = "notebook.ipynb"   # fixed name, so nothing a user types ends up in a file path
+
+
+def check_slug(slug):
+    """Stop unless the slug looks like a Kaggle notebook name (lowercase letters, digits, dashes), so it
+    can't carry a path like ../x into the file we write."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,49}", slug or ""):
+        raise SystemExit(f"bad slug {slug!r}: use 3-50 lowercase letters, digits or dashes")
+    return slug
+
+
 def make_metadata(meta, owner, slug, title=None):
     """New kernel metadata from the pulled one: same inputs, GPU on, internet off, private."""
     m = dict(meta)
@@ -31,7 +43,7 @@ def make_metadata(meta, owner, slug, title=None):
     if not re.fullmatch(r"[a-z0-9-]+", slug):
         raise ValueError("slug must be lowercase letters, digits, dashes")
     m.update(id=f"{owner}/{slug}", title=title or slug.replace("-", " "), enable_gpu=True,
-             enable_internet=False, is_private=True, code_file=f"{slug}.ipynb", language="python", kernel_type="notebook")
+             enable_internet=False, is_private=True, code_file=NB_FILE, language="python", kernel_type="notebook")
     return m
 
 
@@ -99,7 +111,7 @@ def check_sources(md, run=sh):
 
 
 def cmd_run(a):
-    work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
+    work = Path(WORK); work.mkdir(parents=True, exist_ok=True)
     sh(["kaggle", "kernels", "pull", a.src, "-p", str(work), "-m"])
     nb_file = next(work.glob("*.ipynb"), None)
     if nb_file is None:
@@ -108,8 +120,8 @@ def cmd_run(a):
     owner = kaggle_owner()
     new = append_cells(json.loads(nb_file.read_text()), [Path(c).read_text() for c in a.cells])
     md = make_metadata(meta, owner, a.slug)
-    out = Path(a.work + "_push"); out.mkdir(exist_ok=True)
-    (out / md["code_file"]).write_text(json.dumps(new))
+    out = Path(WORK + "_push"); out.mkdir(exist_ok=True)
+    (out / NB_FILE).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
     print("pushing kernel id:", md["id"], flush=True)
@@ -126,7 +138,7 @@ def cmd_run(a):
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
         return
-    cmd_fetch(argparse.Namespace(ref=md["id"], work=a.work, wait=True))
+    cmd_fetch(argparse.Namespace(ref=md["id"], wait=True, tail=80))
 
 
 def cmd_fetch(a):
@@ -135,10 +147,104 @@ def cmd_fetch(a):
     print("status:", st)
     if st in ("running", "queued", "unknown"):
         print("not finished yet; run fetch again later"); return
-    res = Path(a.work + "_out"); res.mkdir(exist_ok=True)
-    sh(["kaggle", "kernels", "output", ref, "-p", str(res)], check=False)
+    res = Path(WORK + "_out"); res.mkdir(exist_ok=True)
+    # only the log and holdout probabilities: adapters and checkpoints are hundreds of MB and stay on Kaggle
+    sh(["kaggle", "kernels", "output", ref, "-p", str(res), "--file-pattern", r"(\.log|oof_[^/]*\.npz)$"], check=False)
     for f in res.glob("*.log"):
-        print("--- last lines of", f.name); print("".join(f.read_text().splitlines(True)[-60:]))
+        print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
+        if st == "error":
+            print("--- last error lines"); print("\n".join(error_lines(f.read_text())[-15:]))
+    for f in sorted(res.rglob("oof_*.npz")):
+        print("--- saved", f.relative_to(res))
+        try:
+            import numpy as np, oof_report
+            print("\n".join(oof_report.report_lines(np.load(f))))
+        except ImportError:
+            print("(install numpy to see the per-label report)")
+    print(sh(["kaggle", "quota"], check=False))
+
+
+POOL_FILES = ["pool_data.py", "metrics.py", "baseline_tfidf.py", "train_lora.py"]
+POOL_PIP = "transformers==5.24.1 peft==0.22.0 bitsandbytes==0.50.2 accelerate==1.16.0"
+POOL_RUNS = {  # A = official only, B = official + capped pool, final = B on 100% of official rows (no holdout)
+    "A": "--use_pool 0 --epochs 3",
+    "B": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1",
+    "final": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --holdout_frac 0",
+    "probe": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --probe_only 1",
+}
+POOL_FIND = """import glob, os, subprocess, sys
+def find(pattern):
+    hits = sorted(glob.glob('/kaggle/input/**/' + pattern, recursive=True))
+    assert hits, 'not found: ' + pattern
+    return hits[0]
+TRAIN = find('train.csv')
+POOL = find('ntl_open_pool.parquet')
+MODEL = os.path.dirname(find('qwen*/**/config.json'))
+print('train', TRAIN, '| pool', POOL, '| model', MODEL, flush=True)
+subprocess.run(['nvidia-smi', '-L'])
+"""
+
+
+def pool_run_args(run):
+    """Command-line flags for run A, B, final or the speed probe (KeyError for anything else)."""
+    return POOL_RUNS[run]
+
+
+def build_pool_notebook(files, run, n_gpus):
+    """Notebook: install pinned packages, write each repo .py file with %%writefile, then launch train_lora.py
+    with torchrun on n_gpus GPUs for the chosen run."""
+    cells = [code_cell(f"!pip install -q {POOL_PIP}")]
+    cells += [code_cell(f"%%writefile {Path(f).name}\n" + Path(f).read_text()) for f in files]
+    launch = (POOL_FIND +
+              f"cmd = ['torchrun', '--nproc_per_node', '{n_gpus}', 'train_lora.py', '--train_csv', TRAIN, '--pool', POOL,\n"
+              f"       '--model_path', MODEL, '--run_name', '{run}'] + '{pool_run_args(run)}'.split()\n"
+              "print(' '.join(cmd), flush=True)\n"
+              "rc = subprocess.run(cmd).returncode\n"
+              "print('exit code', rc, flush=True)\n"
+              "assert rc == 0, 'training failed or stopped (look for an ABORT line above)'\n")
+    cells.append(code_cell(launch))
+    return {"cells": cells, "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}},
+            "nbformat": 4, "nbformat_minor": 5}
+
+
+def pool_metadata(owner, slug, model="qwen-lm/qwen-3/Transformers/8b-base/1"):
+    """Private GPU notebook with internet (for the pip install), the Open Pool, the competition data and Qwen3-8B."""
+    return {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": NB_FILE, "language": "python",
+            "kernel_type": "notebook", "is_private": True, "enable_gpu": True, "enable_internet": True,
+            "machine_shape": "NvidiaTeslaT4", "dataset_sources": ["crtproduction/name-that-llm-open-pool"],
+            "competition_sources": ["name-that-llm"], "model_sources": [model], "kernel_sources": []}
+
+
+def error_lines(log_text):
+    """Lines from the stderr part of a Kaggle log that look like a traceback or an error, to see why a run failed."""
+    try:
+        chunks = json.loads(log_text)
+    except ValueError:
+        return []
+    text = "".join(c.get("data", "") for c in chunks if c.get("stream_name") == "stderr")
+    keep = ("Traceback", "Error", "error:", "File \"", "raise ", "Killed", "OOM")
+    return [ln for ln in text.splitlines() if any(k in ln for k in keep)]
+
+
+def stdout_lines(log_text):
+    """Kaggle's .log is a JSON list of stdout/stderr chunks; return only the stdout lines (plain text passes through)."""
+    try:
+        chunks = json.loads(log_text)
+    except ValueError:
+        return log_text.splitlines()
+    text = "".join(c.get("data", "") for c in chunks if c.get("stream_name") == "stdout")
+    return text.splitlines()
+
+
+def cmd_pool_train(a):
+    owner = kaggle_owner()
+    out = Path(WORK + "_pool"); out.mkdir(exist_ok=True)
+    md = pool_metadata(owner, check_slug(a.slug))
+    (out / NB_FILE).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
+    (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
+    print("pushing kernel id:", md["id"], "run", a.run, "flags:", pool_run_args(a.run), flush=True)
+    print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    print(sh(["kaggle", "quota"], check=False))
 
 
 def cmd_probe(a):
@@ -146,7 +252,7 @@ def cmd_probe(a):
     owner = kaggle_owner()
     for gpu in (False, True):
         slug = "ci-probe-gpu" if gpu else "ci-probe-cpu"
-        d = Path(a.work + "_" + slug); d.mkdir(exist_ok=True)
+        d = Path(WORK + "_" + slug); d.mkdir(exist_ok=True)
         (d / "probe.ipynb").write_text(json.dumps({"cells": [code_cell("print('ok')")], "metadata": {},
                                                     "nbformat": 4, "nbformat_minor": 5}))
         md = {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": "probe.ipynb",
@@ -165,8 +271,11 @@ def cmd_probe(a):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(); s = p.add_subparsers(dest="c", required=True)
     r = s.add_parser("run"); r.add_argument("--src", required=True); r.add_argument("--slug", required=True)
-    r.add_argument("--cells", nargs="+", required=True); r.add_argument("--work", default="kr_work"); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
-    f = s.add_parser("fetch"); f.add_argument("--ref", required=True); f.add_argument("--work", default="kr_work")
+    r.add_argument("--cells", nargs="+", required=True); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
+    f = s.add_parser("fetch"); f.add_argument("--ref", required=True)
+    f.add_argument("--tail", type=int, default=80)
     f.add_argument("--wait", action="store_true"); f.set_defaults(f=cmd_fetch)
-    pr = s.add_parser("probe"); pr.add_argument("--work", default="kr_work"); pr.set_defaults(f=cmd_probe)
+    pt = s.add_parser("pool_train"); pt.add_argument("--slug", required=True); pt.add_argument("--run", required=True, choices=sorted(POOL_RUNS))
+    pt.add_argument("--gpus", type=int, default=2); pt.set_defaults(f=cmd_pool_train)
+    pr = s.add_parser("probe"); pr.set_defaults(f=cmd_probe)
     a = p.parse_args(); a.f(a)

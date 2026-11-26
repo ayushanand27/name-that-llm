@@ -1,0 +1,63 @@
+import pytest
+
+import train_lora as tl
+
+
+def test_estimate_hours_and_abort():
+    # 50 steps took 100 s -> 2 s/step; 20,000 steps left -> 40,000 s = 11.1 h
+    est, abort = tl.probe_decision(elapsed_s=100, probe_steps=50, steps_left=20_000, limit_h=8)
+    assert est == pytest.approx(100 / 50 * 20_000 / 3600) and abort
+    est, abort = tl.probe_decision(elapsed_s=100, probe_steps=50, steps_left=10_000, limit_h=8)
+    assert est == pytest.approx(5.5556, rel=1e-3) and not abort
+
+
+def test_time_guard():
+    assert not tl.out_of_time(elapsed_s=3600 * 10, budget_h=10.5)
+    assert tl.out_of_time(elapsed_s=3600 * 10.6, budget_h=10.5)
+
+
+def test_last_checkpoint(tmp_path):
+    assert tl.last_checkpoint(tmp_path) is None
+    for n in (200, 1000, 400):
+        (tmp_path / f"checkpoint-{n}").mkdir()
+    (tmp_path / "checkpoint-junk").mkdir()
+    assert tl.last_checkpoint(tmp_path).endswith("checkpoint-1000")
+
+
+def test_steps_per_epoch():
+    assert tl.steps_per_epoch(n_rows=1000, batch=8, grad_accum=2, n_gpus=1) == 63
+    assert tl.steps_per_epoch(n_rows=1000, batch=8, grad_accum=2, n_gpus=2) == 32
+
+
+def test_softmax_rows():
+    import numpy as np
+    p = tl.softmax(np.array([[0.0, 0.0], [1000.0, 0.0]]))
+    assert p[0].tolist() == [0.5, 0.5] and p[1, 0] == pytest.approx(1.0)
+
+
+def test_loss_problem_finite_falling_is_ok():
+    assert tl.loss_problem([2.9, 2.7, 2.4, 2.1], at_probe_end=True) is None
+
+
+def test_loss_problem_nan_or_inf_aborts_anytime():
+    assert tl.loss_problem([2.9, float("nan")], at_probe_end=False) == "non-finite loss"
+    assert tl.loss_problem([float("inf")], at_probe_end=False) == "non-finite loss"
+
+
+def test_loss_problem_flat_aborts_only_at_probe_end():
+    assert tl.loss_problem([2.9, 2.9, 2.95], at_probe_end=False) is None
+    assert tl.loss_problem([2.9, 2.9, 2.95], at_probe_end=True) == "loss not falling"
+    assert tl.loss_problem([2.9], at_probe_end=True) is None          # one value: nothing to compare yet
+
+
+def test_scoring_estimate():
+    # 512 passages in 64 s -> 0.125 s each -> 4,000 take 500 s = 8.3 min
+    assert tl.scoring_minutes(seconds=64, n_scored=512, n_target=4000) == pytest.approx(500 / 60)
+
+
+def test_inside_root_keeps_paths_in_the_work_folder(tmp_path):
+    import pytest
+    assert tl.inside_root(tmp_path / "run", tmp_path) == (tmp_path / "run").resolve()
+    for bad in (tmp_path / ".." / "elsewhere", "/etc/x"):
+        with pytest.raises(ValueError):
+            tl.inside_root(bad, tmp_path)
