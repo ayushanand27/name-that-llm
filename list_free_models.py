@@ -47,8 +47,7 @@ def main(argv=None):
     hits = {}
     for m in sorted(free, key=lambda m: m["id"]):
         lab, why = match(m["id"])
-        if lab or why:
-            print(f"  {m['id']:<55} -> {lab or '-':<22} {why}")
+        print(f"  {m['id']:<55} -> {lab or '-':<22} {why}")
         if lab:
             hits.setdefault(lab, []).append(m["id"])
     print(f"labels with a same-model free id: {len(hits)} of {len(LABELS)}")
