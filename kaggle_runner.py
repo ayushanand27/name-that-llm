@@ -59,10 +59,21 @@ def wait(ref, poll_s=300, max_s=12 * 3600, run=sh):
 
 
 def kaggle_owner(run=sh, env=os.environ):
-    """Kaggle username: KAGGLE_USERNAME if set (needed with the new single-token login), else from the CLI config."""
-    if env.get("KAGGLE_USERNAME"):
-        return env["KAGGLE_USERNAME"].strip()
-    return run(["kaggle", "config", "view"]).split("username:")[-1].split()[0]
+    """Kaggle username. The CLI's own login (the token's real owner) wins, since a kernel id with any other
+    owner is refused with 403. KAGGLE_USERNAME is only a fallback when the CLI can't say."""
+    want = (env.get("KAGGLE_USERNAME") or "").strip()
+    try:
+        out = run(["kaggle", "config", "view"])
+        cli = out.split("username:")[-1].split()[0] if "username:" in out else ""
+    except Exception:
+        cli = ""
+    if cli and cli.lower() != "none":
+        if want and want != cli:
+            print(f"note: KAGGLE_USERNAME differs from the logged-in Kaggle user; using {cli}", flush=True)
+        return cli
+    if want:
+        return want
+    raise RuntimeError("could not tell the Kaggle username; check the KAGGLE_API_TOKEN secret")
 
 
 def cmd_run(a):
@@ -79,6 +90,7 @@ def cmd_run(a):
     (out / md["code_file"]).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
+    print("pushing kernel id:", md["id"], flush=True)
     print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
