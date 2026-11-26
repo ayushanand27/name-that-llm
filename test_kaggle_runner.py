@@ -128,3 +128,27 @@ def test_check_slug_and_inside_refuse_paths(tmp_path):
         with pytest.raises(SystemExit):
             k.check_slug(bad)
     assert k.pool_metadata("me", "ayush-pool-b")["code_file"] == "notebook.ipynb"
+
+
+def test_run_p_is_pool_only_without_proxy_rows_and_b_keeps_its_recipe():
+    import kaggle_runner as k
+    p = k.pool_run_args("P")
+    assert "--official_in_train 0" in p and "--drop_flag_kb_proxy 1" in p and "--drop_gem37_after_oct8 0" in p
+    assert "--cap 1500" in p and "--epochs 1" in p and "--holdout_frac" not in p
+    assert "--drop_flag_kb_proxy 1" in k.pool_run_args("final")
+    assert "--drop_flag_kb_proxy 0" in k.pool_run_args("B") and "--drop_flag_kb_proxy 0" in k.pool_run_args("probe")
+
+
+def test_pool_notebook_scores_the_test_set(tmp_path):
+    import kaggle_runner as k
+    src = "".join(k.build_pool_notebook([], "P", n_gpus=2)["cells"][-1]["source"])
+    assert "find('test.csv')" in src and "'--test_csv', TEST" in src
+
+
+def test_fetch_pattern_keeps_oof_and_test_files_only():
+    import re, kaggle_runner as k
+    pat = re.compile(k.FETCH_PATTERN)
+    for f in ("x.log", "lora_run/oof_P.npz", "lora_run/test_P.npz"):
+        assert pat.search(f), f
+    for f in ("lora_run/adapter/adapter_model.safetensors", "lora_run/ckpt/checkpoint-200/optimizer.pt"):
+        assert not pat.search(f), f

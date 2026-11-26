@@ -4,7 +4,7 @@ on:
     inputs:
       action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect, head_cv, gem37, free_models, scan]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
-      run:    {description: "pool_train only: probe (speed test), A, B or final", required: false, default: probe, type: choice, options: [probe, A, B, final]}
+      run:    {description: "pool_train only: probe (speed test), A, B, P (pool only) or final", required: false, default: probe, type: choice, options: [probe, A, B, P, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
       show:   {description: "inspect only: notebook line ranges, e.g. 24:37-50 4:28-41", required: false, default: ""}
       refs:   {description: "scan only: dataset refs to scan instead of searching", required: false, default: ""}
