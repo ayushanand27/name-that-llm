@@ -53,3 +53,8 @@ def test_check_sources_lists_unreadable():
     bad = k.check_sources(md, run=run)
     assert [(b[0], b[1]) for b in bad] == [("dataset_sources", "x/private")]
     assert "403" in bad[0][2]
+
+def test_metadata_drops_source_id_no():
+    import kaggle_runner as k
+    m = k.make_metadata({"id": "rohan/x", "id_no": 12345, "dataset_sources": ["a/b"]}, "me", "my-run")
+    assert "id_no" not in m and m["id"] == "me/my-run" and m["dataset_sources"] == ["a/b"]

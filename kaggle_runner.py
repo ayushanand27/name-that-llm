@@ -27,6 +27,7 @@ def append_cells(nb, cell_texts):
 def make_metadata(meta, owner, slug, title=None):
     """New kernel metadata from the pulled one: same inputs, GPU on, internet off, private."""
     m = dict(meta)
+    m.pop("id_no", None)  # pulled id_no is the source kernel's number; keeping it makes push try to edit their kernel (403)
     if not re.fullmatch(r"[a-z0-9-]+", slug):
         raise ValueError("slug must be lowercase letters, digits, dashes")
     m.update(id=f"{owner}/{slug}", title=title or slug.replace("-", " "), enable_gpu=True,
