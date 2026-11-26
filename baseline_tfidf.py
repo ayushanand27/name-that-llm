@@ -66,8 +66,8 @@ def main():
     ap.add_argument("--use_pool", type=int, default=1)
     ap.add_argument("--cap", type=int, default=1500)
     ap.add_argument("--kimi_high_only", type=int, default=0)
-    ap.add_argument("--drop_flag_kb_proxy", type=int, default=0)
-    ap.add_argument("--drop_gem37_after_oct8", type=int, default=1, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
+    ap.add_argument("--drop_flag_kb_proxy", type=int, default=1)
+    ap.add_argument("--drop_gem37_after_oct8", type=int, default=0, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
     cfg = pdm.Config(use_pool=bool(a.use_pool), cap=a.cap, kimi_high_only=bool(a.kimi_high_only),

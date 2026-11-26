@@ -79,8 +79,9 @@ class Config:
     use_pool: bool = True
     cap: int = 1500
     kimi_high_only: bool = False
-    drop_flag_kb_proxy: bool = False
-    drop_gem37_after_oct8: bool = True
+    drop_flag_kb_proxy: bool = True        # Ayush 26 Nov: drop the after-ruling proxy rows from every retrain
+    drop_gem37_after_oct8: bool = False    # switch gained +0.000 on the TF-IDF yardstick, so off by default
+    official_in_train: bool = True         # False = run P: train on pool only, score every official row
     holdout_frac: float = 0.2
     seed: int = 42
     kimi_label: str = "kimi-k3"
@@ -93,11 +94,15 @@ def _frame(df, label_ids, group, is_official):
 
 def build_dataset(official, pool, cfg):
     """Returns (train, holdout, labels). Holdout = only official rows of the held-out prompts.
-    Train = the other official rows, plus (if use_pool) the filtered, de-duplicated, capped pool rows."""
+    Train = the other official rows, plus (if use_pool) the filtered, de-duplicated, capped pool rows.
+    With official_in_train False, train is the pool rows alone and the holdout is every official row."""
     labels = check_labels(official)
     ids = {m: i for i, m in enumerate(labels)}
-    off_tr, off_ho = split_holdout(official, cfg.holdout_frac, cfg.seed)
-    parts = [_frame(off_tr, ids, "off:" + off_tr.prompt_id.astype(str).values, True)]
+    if cfg.official_in_train:
+        off_tr, off_ho = split_holdout(official, cfg.holdout_frac, cfg.seed)
+        parts = [_frame(off_tr, ids, "off:" + off_tr.prompt_id.astype(str).values, True)]
+    else:   # pool only: the model never sees an official row, so its scores on all of them are out-of-fold
+        off_ho, parts = official, []
     if cfg.use_pool:
         p = pool[pool.model.isin(ids)]
         p = apply_switches(p, cfg.kimi_high_only, cfg.drop_flag_kb_proxy, cfg.kimi_label)

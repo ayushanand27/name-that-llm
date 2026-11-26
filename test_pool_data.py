@@ -113,5 +113,14 @@ def test_gem37_switch_handles_missing_column_and_odd_dates():
     assert pdm.gem37_after_mask(odd).tolist() == [False, True]       # unparseable kept, timestamp parsed
 
 
-def test_config_has_gem37_switch_on_by_default():
-    assert pdm.Config().drop_gem37_after_oct8 is True
+def test_defaults_drop_proxy_rows_and_keep_gem37_rows():
+    cfg = pdm.Config()
+    assert cfg.drop_flag_kb_proxy is True and cfg.drop_gem37_after_oct8 is False and cfg.official_in_train is True
+
+
+def test_pool_only_trains_on_pool_and_holds_out_every_official_row():
+    off, pool = fake_official(), fake_pool()
+    train, hold, _ = pdm.build_dataset(off, pool, pdm.Config(use_pool=True, cap=5, official_in_train=False, seed=0))
+    assert not train.is_official.any() and len(train) > 0
+    assert len(hold) == len(off) and hold.is_official.all()
+    assert set(train.text.map(pdm.normalize_text)).isdisjoint(set(hold.text.map(pdm.normalize_text)))
