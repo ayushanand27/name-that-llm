@@ -105,3 +105,17 @@ def test_pool_notebook_cells_are_valid_python(tmp_path):
     nb = k.build_pool_notebook([], "final", n_gpus=1)
     ast.parse("".join(nb["cells"][-1]["source"]))
     assert "--holdout_frac" in "".join(nb["cells"][-1]["source"])
+
+
+def test_error_lines_keep_traceback_only():
+    import kaggle_runner as k
+    log = ('[{"stream_name":"stdout","time":1,"data":"Error in stdout is ignored\\n"}\n,'
+           '{"stream_name":"stderr","time":2,"data":"warn: slow\\nTraceback (most recent call last):\\n  File \\"x.py\\", line 1\\nValueError: bad\\n"}]')
+    assert k.error_lines(log) == ["Traceback (most recent call last):", '  File "x.py", line 1', "ValueError: bad"]
+    assert k.error_lines("not json") == []
+
+
+def test_launch_cell_needs_exit_code_zero():
+    import kaggle_runner as k
+    src = "".join(k.build_pool_notebook([], "B", n_gpus=2)["cells"][-1]["source"])
+    assert "assert rc == 0" in src

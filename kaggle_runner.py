@@ -139,6 +139,8 @@ def cmd_fetch(a):
     sh(["kaggle", "kernels", "output", ref, "-p", str(res)], check=False)
     for f in res.glob("*.log"):
         print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
+        if st == "error":
+            print("--- last error lines"); print("\n".join(error_lines(f.read_text())[-15:]))
     for f in sorted(res.rglob("oof_*.npz")):
         print("--- saved", f.relative_to(res))
     print(sh(["kaggle", "quota"], check=False))
@@ -181,7 +183,7 @@ def build_pool_notebook(files, run, n_gpus):
               "print(' '.join(cmd), flush=True)\n"
               "rc = subprocess.run(cmd).returncode\n"
               "print('exit code', rc, flush=True)\n"
-              "assert rc in (0, 2), 'training failed'\n")
+              "assert rc == 0, 'training failed or stopped (look for an ABORT line above)'\n")
     cells.append(code_cell(launch))
     return {"cells": cells, "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}},
             "nbformat": 4, "nbformat_minor": 5}
@@ -193,6 +195,17 @@ def pool_metadata(owner, slug, model="qwen-lm/qwen-3/Transformers/8b-base/1"):
             "kernel_type": "notebook", "is_private": True, "enable_gpu": True, "enable_internet": True,
             "machine_shape": "NvidiaTeslaT4", "dataset_sources": ["crtproduction/name-that-llm-open-pool"],
             "competition_sources": ["name-that-llm"], "model_sources": [model], "kernel_sources": []}
+
+
+def error_lines(log_text):
+    """Lines from the stderr part of a Kaggle log that look like a traceback or an error, to see why a run failed."""
+    try:
+        chunks = json.loads(log_text)
+    except ValueError:
+        return []
+    text = "".join(c.get("data", "") for c in chunks if c.get("stream_name") == "stderr")
+    keep = ("Traceback", "Error", "error:", "File \"", "raise ", "Killed", "OOM")
+    return [ln for ln in text.splitlines() if any(k in ln for k in keep)]
 
 
 def stdout_lines(log_text):
