@@ -2,7 +2,7 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline]}
+      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
       run:    {description: "pool_train only: probe (speed test), A, B or final", required: false, default: probe, type: choice, options: [probe, A, B, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
@@ -80,3 +80,13 @@ jobs:
           python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --out oof_tfidf_B.npz
           python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --kimi_high_only 1 --out oof_tfidf_C.npz
           python -c "import baseline_tfidf as b; print('\n'.join(b.compare_oof(['oof_tfidf_A.npz','oof_tfidf_B.npz','oof_tfidf_C.npz'])))"
+      - name: inspect
+        if: inputs.action == 'inspect'
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: python pb115_inspect.py --out pb115_art
+      - name: inspect artifact
+        if: inputs.action == 'inspect'
+        uses: actions/upload-artifact@v4
+        with: {name: pb115_art, path: pb115_art, retention-days: 1}
