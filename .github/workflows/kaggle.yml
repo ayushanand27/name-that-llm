@@ -6,6 +6,7 @@ on:
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
       run:    {description: "pool_train only: probe (speed test), A, B or final", required: false, default: probe, type: choice, options: [probe, A, B, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
+      show:   {description: "inspect only: notebook line ranges, e.g. 24:37-50 4:28-41", required: false, default: ""}
 permissions:
   contents: read
 jobs:
@@ -85,6 +86,7 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          SHOW: ${{ inputs.show }}
         run: |
           pip install --only-binary=:all: pyarrow==22.0.0 pandas==2.3.3 numpy==2.3.5
           python pb115_inspect.py --out pb115_art

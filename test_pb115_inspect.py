@@ -26,3 +26,8 @@ def test_matches_reports_cell_and_line():
 def test_matches_cuts_long_lines():
     got = pi.matches(["x = 'oof" + "a" * 500 + "'"], "oof")
     assert len(got[0][2]) <= 160
+
+
+def test_show_ranges():
+    cells = ["a\nb\nc\nd", "x\ny"]
+    assert pi.show(cells, ["0:2-3", "1:1-1"]) == ["[0:2] b", "[0:3] c", "[1:1] x"]

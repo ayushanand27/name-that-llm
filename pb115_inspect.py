@@ -8,6 +8,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -50,6 +51,16 @@ def describe(path):
     return f"{path.name}: {len(df)} rows x {len(cols)} cols; first cols {cols[:8]}; last cols {cols[-5:]}"
 
 
+def show(cells, ranges):
+    """Print chosen lines of the public notebook, e.g. '24:37-45' = cell 24, lines 37 to 45."""
+    out = []
+    for r in ranges:
+        c, span = r.split(":"); lo, hi = (int(x) for x in span.split("-"))
+        lines = cells[int(c)].splitlines()
+        out += [f"[{c}:{j}] {lines[j - 1]}" for j in range(lo, min(hi, len(lines)) + 1)]
+    return out
+
+
 def sh(cmd):
     return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
@@ -59,7 +70,9 @@ def main(argv=None):
     ap.add_argument("--out", default="pb115_art")
     ap.add_argument("--datasets", nargs="*", default=DATASETS)
     ap.add_argument("--cap_mb", type=int, default=50)
+    ap.add_argument("--show", nargs="*", default=[], help="cell:first-last line ranges to print")
     a = ap.parse_args(argv)
+    a.show = a.show or [r for r in os.environ.get("SHOW", "").split() if re.fullmatch(r"\d+:\d+-\d+", r)]
     out = Path(a.out); out.mkdir(exist_ok=True)
     src = Path("pb115_src"); src.mkdir(exist_ok=True)
     sh(["kaggle", "kernels", "pull", SRC, "-p", str(src), "-m"])
@@ -69,6 +82,9 @@ def main(argv=None):
     print(f"notebook: {len(cells)} code cells, {sum(len(c.splitlines()) for c in cells)} lines")
     for i, c in enumerate(cells):
         print(f"cell {i}: {len(c.splitlines())} lines; first line: {c.strip().splitlines()[0][:120] if c.strip() else ''}")
+    if a.show:
+        print("\n".join(show(cells, a.show)))
+        return
     print("lines about features, folds and the head:")
     for i, j, line in matches(cells):
         print(f"  [{i}:{j}] {line}")
