@@ -148,7 +148,8 @@ def cmd_fetch(a):
     if st in ("running", "queued", "unknown"):
         print("not finished yet; run fetch again later"); return
     res = Path(WORK + "_out"); res.mkdir(exist_ok=True)
-    sh(["kaggle", "kernels", "output", ref, "-p", str(res)], check=False)
+    # only the log and holdout probabilities: adapters and checkpoints are hundreds of MB and stay on Kaggle
+    sh(["kaggle", "kernels", "output", ref, "-p", str(res), "--file-pattern", r"(\.log|oof_[^/]*\.npz)$"], check=False)
     for f in res.glob("*.log"):
         print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
         if st == "error":
