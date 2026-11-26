@@ -76,6 +76,27 @@ def kaggle_owner(run=sh, env=os.environ):
     raise RuntimeError("could not tell the Kaggle username; check the KAGGLE_API_TOKEN secret")
 
 
+SOURCE_CHECKS = {
+    "competition_sources": ["kaggle", "competitions", "files"],
+    "dataset_sources": ["kaggle", "datasets", "files"],
+    "kernel_sources": ["kaggle", "kernels", "files"],
+    "model_sources": ["kaggle", "models", "instances", "versions", "files"],
+}
+
+
+def check_sources(md, run=sh):
+    """Read-only probe of every input the kernel uses; returns the ones this account can't read."""
+    bad = []
+    for key, cmd in SOURCE_CHECKS.items():
+        for ref in md.get(key) or []:
+            try:
+                run(cmd + [ref])
+            except Exception as e:
+                last = [l for l in str(e).splitlines() if l.strip()]
+                bad.append((key, ref, " | ".join(last[1:3])[:200]))
+    return bad
+
+
 def cmd_run(a):
     work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
     sh(["kaggle", "kernels", "pull", a.src, "-p", str(work), "-m"])
@@ -91,7 +112,16 @@ def cmd_run(a):
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
     print("pushing kernel id:", md["id"], flush=True)
-    print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    try:
+        print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    except RuntimeError:
+        print("push refused; checking which inputs this account can't read...", flush=True)
+        bad = check_sources(md)
+        for key, ref, why in bad:
+            print(f"  CAN'T READ {key}: {ref}  ({why})", flush=True)
+        if not bad:
+            print("  every input is readable, so the refusal is about the account or token (e.g. token scope, phone verification)")
+        raise
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
         return
