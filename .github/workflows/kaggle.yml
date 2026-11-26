@@ -85,8 +85,6 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-        run: python pb115_inspect.py --out pb115_art
-      - name: inspect artifact
-        if: inputs.action == 'inspect'
-        uses: actions/upload-artifact@v4
-        with: {name: pb115_art, path: pb115_art, retention-days: 1}
+        run: |
+          pip install --only-binary=:all: pyarrow==22.0.0 pandas==2.3.3 numpy==2.3.5
+          python pb115_inspect.py --out pb115_art
