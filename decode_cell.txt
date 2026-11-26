@@ -1,0 +1,132 @@
+# ==== CV test: per-prompt decoding on the out-of-fold probabilities (argmax vs Sinkhorn vs Hungarian) ====
+# Paste as a new cell AFTER the 256-token CV cell. It reads /kaggle/working/cut256/oof.npz (official train rows only).
+# CPU only, a few seconds. Changes nothing in the submission.
+import json, os
+from pathlib import Path
+import numpy as np
+
+DROP_FRAC = 0.20       # noisy groups: share of texts dropped from each prompt group
+DROP_SEED = 0
+CONTAM_FRAC = 0.25     # contaminated groups: share of each group's texts swapped for texts of other prompts
+CONTAM_SEED = 0
+SINKHORN_ITERS = 50
+OOF_PATH = Path('/kaggle/working/cut256/oof.npz')
+
+
+def decode_argmax(P):
+    return P.argmax(1)
+
+
+def sinkhorn(P, iters=SINKHORN_ITERS, eps=1e-12):
+    """Rescale one group's (n, K) probs so rows sum to 1 and columns to n/K (each model about once)."""
+    Q = np.clip(np.asarray(P, dtype=np.float64), eps, None)
+    n, K = Q.shape
+    col_target = n / K
+    for _ in range(iters):
+        Q = Q * (col_target / Q.sum(0, keepdims=True))
+        Q = Q / Q.sum(1, keepdims=True)
+    return Q
+
+
+def decode_sinkhorn(P):
+    return sinkhorn(P).argmax(1)
+
+
+def hungarian(P, eps=1e-12):
+    """One model per text, no model twice: assignment on -log(prob). Groups under K are padded with zero-cost
+    dummy rows; groups over K (repeats) get the model columns repeated so every text still gets a model."""
+    from scipy.optimize import linear_sum_assignment
+    P = np.asarray(P, dtype=np.float64)
+    n, K = P.shape
+    reps = max(1, int(np.ceil(n / K)))
+    cost = np.tile(-np.log(np.clip(P, eps, None)), (1, reps))          # (n, K * reps)
+    size = cost.shape[1]
+    padded = np.zeros((size, size))
+    padded[:n] = cost                                                    # rows n.. are dummies
+    rows, cols = linear_sum_assignment(padded)
+    out = np.empty(n, dtype=np.int64)
+    real = rows < n
+    out[rows[real]] = cols[real] % K
+    return out
+
+
+def decode_by_group(P, groups, fn):
+    """Apply a per-group decoder; groups never mix."""
+    pred = np.empty(len(P), dtype=np.int64)
+    for g in np.unique(groups):
+        idx = np.flatnonzero(groups == g)
+        pred[idx] = fn(P[idx])
+    return pred
+
+
+def drop_per_group(groups, frac=DROP_FRAC, seed=DROP_SEED):
+    """Keep-mask that drops round(frac * size) texts at random from every group (at least one text kept)."""
+    rng = np.random.default_rng(seed)
+    keep = np.ones(len(groups), dtype=bool)
+    for g in np.unique(groups):
+        idx = np.flatnonzero(groups == g)
+        k = min(int(round(frac * len(idx))), len(idx) - 1)
+        if k > 0:
+            keep[rng.choice(idx, size=k, replace=False)] = False
+    return keep
+
+
+def contaminate_groups(groups, frac=CONTAM_FRAC, seed=CONTAM_SEED):
+    """Row indices and group ids where round(frac * size) texts of each group are swapped for texts
+    of OTHER prompts (labels travel with the text). Size of every group stays the same."""
+    rng = np.random.default_rng(seed)
+    groups = np.asarray(groups)
+    rows, new_groups = [], []
+    for g in np.unique(groups):
+        own = np.flatnonzero(groups == g)
+        others = np.flatnonzero(groups != g)
+        k = min(int(round(frac * len(own))), len(own) - 1, len(others))
+        kept = rng.choice(own, size=len(own) - k, replace=False) if k else own
+        foreign = rng.choice(others, size=k, replace=False) if k else np.empty(0, dtype=np.int64)
+        idx = np.r_[kept, foreign].astype(np.int64)
+        rows.append(idx)
+        new_groups.append(np.full(len(idx), g, dtype=groups.dtype))
+    return np.concatenate(rows), np.concatenate(new_groups)
+
+
+def decoding_report(P, y, groups, n_classes):
+    from sklearn.metrics import balanced_accuracy_score as bacc
+    ba = lambda yy, pp: float(bacc(yy, pp))
+    out = {'argmax': ba(y, decode_argmax(P)),
+           'sinkhorn': ba(y, decode_by_group(P, groups, decode_sinkhorn)),
+           'hungarian': ba(y, decode_by_group(P, groups, hungarian))}
+    keep = drop_per_group(groups)
+    Pk, yk, gk = P[keep], y[keep], groups[keep]
+    out['dropped_texts'] = int((~keep).sum())
+    out['argmax_noisy'] = ba(yk, decode_argmax(Pk))
+    out['hungarian_noisy'] = ba(yk, decode_by_group(Pk, gk, hungarian))
+    rows, cg = contaminate_groups(groups)
+    Pc, yc = P[rows], y[rows]
+    out['contaminated_texts'] = int(sum((cg == g).sum() - np.isin(rows[cg == g], np.flatnonzero(groups == g)).sum() for g in np.unique(groups)))
+    out['argmax_contaminated'] = ba(yc, decode_argmax(Pc))
+    out['sinkhorn_contaminated'] = ba(yc, decode_by_group(Pc, cg, decode_sinkhorn))
+    out['hungarian_contaminated'] = ba(yc, decode_by_group(Pc, cg, hungarian))
+    sizes = np.unique(groups, return_counts=True)[1]
+    out['group_sizes'] = {int(s): int(c) for s, c in zip(*np.unique(sizes, return_counts=True))}
+    return out
+
+
+def print_decoding(name, r, log=print):
+    log(f'{name}: balanced accuracy  argmax {r["argmax"]:.4f}  sinkhorn {r["sinkhorn"]:.4f}  hungarian {r["hungarian"]:.4f}')
+    log(f'{name}: {int(DROP_FRAC * 100)}% dropped per group ({r["dropped_texts"]} texts)  argmax {r["argmax_noisy"]:.4f}  '
+        f'hungarian {r["hungarian_noisy"]:.4f}')
+    log(f'{name}: {int(CONTAM_FRAC * 100)}% of each group from other prompts ({r["contaminated_texts"]} texts)  '
+        f'argmax {r["argmax_contaminated"]:.4f}  sinkhorn {r["sinkhorn_contaminated"]:.4f}  hungarian {r["hungarian_contaminated"]:.4f}')
+
+
+if os.getenv('KAGGLE_IS_COMPETITION_RERUN') is None:
+    assert OOF_PATH.exists(), 'run the 256-token CV cell first'
+    with np.load(OOF_PATH, allow_pickle=False) as _o:
+        _y, _g, _labels = _o['y'], _o['prompt_id'].astype(str), _o['labels'].astype(str).tolist()
+        _runs = {'cut 160': _o['p_before'], 'cut 256 on hard': _o['p_after']}
+    _all = {}
+    for _name, _P in _runs.items():
+        _all[_name] = decoding_report(_P, _y, _g, len(_labels))
+        print_decoding(_name, _all[_name])
+    print('prompt group sizes (size: count):', _all['cut 160']['group_sizes'])
+    (OOF_PATH.parent / 'decoding.json').write_text(json.dumps(_all, indent=1))

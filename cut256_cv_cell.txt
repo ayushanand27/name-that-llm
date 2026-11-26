@@ -1,0 +1,252 @@
+# ==== CV test: GLM likelihood cut 160 -> 256, only on sibling-hard train texts ====
+# Paste as the LAST cell of a copy of Rohan's "PB115 Coverage + Sibling Odds" notebook.
+# Uses what the earlier cells set up: DATA, PB115_DIR, V1_DIR, V1_BIN, V1_ENV, V1_FLASH, V1_GLM53, V1_COST.
+# Never runs in the scoring rerun. Changes nothing in the submission.
+import json, os, subprocess, sys, time
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+CUT_BEFORE, CUT_AFTER = 160, 256
+SEEDS = (42, 1042, 2042)          # the PB115 head's LightGBM seeds
+N_FOLDS = 5                       # grouped by prompt_id
+MARGIN = 0.8                      # Sibling Odds: top two within 0.8 log-prob
+SIB_FAMILIES = ('claude-', 'gpt-', 'gemini-')
+N_BOOT = 2000                     # paired bootstrap resamples over prompt_id
+CHECK_N = 24                      # short hard texts re-read to prove the features match the dataset's
+GPU_BUDGET_S = 6.0 * 3600         # stop adding texts past this estimate
+OUT_DIR = Path('/kaggle/working/cut256')
+
+
+def grouped_folds(groups, n_folds=N_FOLDS):
+    """Fold number per row; every prompt_id stays in one fold."""
+    from sklearn.model_selection import GroupKFold
+    folds = np.full(len(groups), -1, dtype=np.int64)
+    for k, (_, va) in enumerate(GroupKFold(n_splits=n_folds).split(np.zeros(len(groups)), groups=groups)):
+        folds[va] = k
+    assert (folds >= 0).all()
+    return folds
+
+
+def head_fit_predict(X_tr, y_tr, X_va, n_classes, seeds=SEEDS):
+    """The PB115 head as in fit_and_predict_pb115: 55% LR + 45% mean of 3 LightGBM seeds."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    import lightgbm as lgb
+    sc = StandardScaler().fit(X_tr)
+    A, B = sc.transform(X_tr), sc.transform(X_va)
+
+    def full(clf, p):  # map to all classes even if a fold misses one
+        out = np.zeros((len(p), n_classes))
+        out[:, clf.classes_] = p
+        return out
+
+    lr = LogisticRegression(C=0.025, max_iter=1000).fit(A, y_tr)
+    p_lr = full(lr, lr.predict_proba(B))
+    p_lgb = []
+    for sd in seeds:
+        clf = lgb.LGBMClassifier(objective='multiclass', num_class=n_classes, n_estimators=220, learning_rate=0.03,
+                                 num_leaves=15, min_child_samples=25, subsample=0.8, colsample_bytree=0.7,
+                                 reg_alpha=1.0, reg_lambda=5.0, random_state=sd, verbose=-1, n_jobs=4).fit(A, y_tr)
+        p_lgb.append(full(clf, clf.predict_proba(B)))
+    return np.clip(0.55 * p_lr + 0.45 * np.mean(p_lgb, axis=0), 1e-8, 1.0)
+
+
+def oof_probs(X, y, folds, n_classes):
+    P = np.zeros((len(y), n_classes))
+    for k in np.unique(folds):
+        tr, va = folds != k, folds == k
+        P[va] = head_fit_predict(X[tr], y[tr], X[va], n_classes)
+    return P
+
+
+def sibling_hard(logp, labels, margin=MARGIN, families=SIB_FAMILIES):
+    """Sibling Odds gate: top two classes from the same Claude/GPT/Gemini family, within `margin`."""
+    fam = np.array([next((f for f in families if l.startswith(f)), 'other:' + l) for l in labels])
+    order = np.argsort(-logp, axis=1)
+    top1, top2 = order[:, 0], order[:, 1]
+    rows = np.arange(len(logp))
+    gap = logp[rows, top1] - logp[rows, top2]
+    same = (fam[top1] == fam[top2]) & np.isin(fam[top1], families)
+    return same & (gap < margin), gap
+
+
+def est_tokens(texts, tok_per_char):
+    return pd.Series(texts).fillna('').astype(str).str.len().to_numpy() * tok_per_char * 1.05
+
+
+def target_classes(labels):
+    """Per-model recall asked for: Gemini Flash, GPT and Claude Opus siblings."""
+    return [l for l in labels if (l.startswith('gemini-') and 'flash' in l) or l.startswith('gpt-') or l.startswith('claude-opus')]
+
+
+def recall_by_class(y, pred, labels, names):
+    return {n: float((pred[y == labels.index(n)] == labels.index(n)).mean()) if (y == labels.index(n)).any() else float('nan')
+            for n in names}
+
+
+def build_X(feats, paired, ids, spec, build_54_matrix):
+    X54 = build_54_matrix(feats, ids, spec['features_54'], spec['diff_features'])
+    X61 = paired.loc[ids][spec['features_61']].to_numpy(np.float64)
+    X = np.hstack([X54, X61])
+    assert np.isfinite(X).all() and X.shape == (len(ids), 115)
+    return X
+
+
+def run_glm(frame, cut, run_dir, model_json):
+    """Both GLM models on `frame` (id, text) at `cut` tokens, with the same pipeline call as V1's stage."""
+    run_dir = Path(run_dir); run_dir.mkdir(parents=True, exist_ok=True)
+    query = run_dir / 'query.csv'
+    frame[['id', 'text']].to_csv(query, index=False)
+    for tag, segs in (('flash', V1_FLASH), ('glm53', V1_GLM53)):
+        cmd = [sys.executable, str(V1_DIR / 'run_pipeline.py'), '--bin', str(V1_BIN), '--segs', str(Path(segs) / '*.gguf'),
+               '--csv', str(query), '--out', str(run_dir), '--tag', tag, '--work', str(run_dir / f'state-{tag}'),
+               '--seq-batch', '8', '--state-dtype', 'auto', '--max-text-tokens', str(cut),
+               '--prefix', model_json.get('prefix', '[gMASK]<sop><|system|>Reasoning Effort: Max<|user|><|assistant|><think></think>'),
+               '--budget-s', str(int(GPU_BUDGET_S))]
+        if model_json.get('user_template'):
+            cmd += ['--user-template', model_json['user_template']]
+        t = time.time()
+        with open(run_dir / f'{tag}_pipeline.txt', 'w') as log:
+            code = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT, env=V1_ENV)
+        print(f'  {tag} at {cut} tokens: {len(frame)} texts, {time.time() - t:.0f}s, exit {code}', flush=True)
+        assert code == 0, f'{tag} pipeline failed (exit {code}), see {run_dir}/{tag}_pipeline.txt'
+    import v1_token_features as vtf
+    feats = {t: pd.read_csv(run_dir / f'{t}_features.csv', dtype={'id': str}).set_index('id') for t in ('flash', 'glm53')}
+    paired = vtf.extract_paired_score_features(run_dir / 'flash_scores.npz', run_dir / 'glm53_scores.npz')
+    return feats, paired
+
+
+def feature_mismatch(new, old):
+    """Worst feature's median relative difference over texts (GPU noise stays tiny)."""
+    rel = np.abs(new - old) / (np.abs(old) + 1e-2)
+    return float(np.median(rel, axis=0).max())
+
+
+def plan_reread(long_hard, gap, n_tok, budget_s, prefix_rows=13):
+    """Long hard texts, smallest gap first, as many as the GPU budget allows. Returns (indices, estimated seconds)."""
+    order = np.flatnonzero(long_hard)[np.argsort(gap[long_hard], kind='stable')]
+    if not len(order):
+        return order, 0.0
+    c = V1_COST if 'V1_COST' in globals() else dict(fixed_s_flash=638.4, row_s_flash=0.01172, fixed_s_glm53=1325.7, row_s_glm53=0.019489)
+    rows = np.minimum(n_tok[order], CUT_AFTER) + prefix_rows
+    cost = c['fixed_s_flash'] + c['fixed_s_glm53'] + (c['row_s_flash'] + c['row_s_glm53']) * np.cumsum(rows)
+    n_fit = int((1.1 * cost <= budget_s).sum())
+    if n_fit < len(order):
+        print(f'GPU budget: re-reading the {n_fit} hardest of {len(order)} long hard texts', flush=True)
+    return order[:n_fit], float(cost[n_fit - 1]) if n_fit else 0.0
+
+
+def group_counts(y, pred0, pred1, groups, n_classes, mask=None):
+    """Per prompt group and class: texts, correct before, correct after. Shape (n_groups, 3, n_classes)."""
+    m = np.ones(len(y), dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    _, g = np.unique(groups, return_inverse=True)
+    out = np.zeros((g.max() + 1, 3, n_classes))
+    for k, w in enumerate((m, m & (pred0 == y), m & (pred1 == y))):
+        np.add.at(out[:, k, :], (g[w], y[w]), 1.0)
+    return out
+
+
+def score_from_counts(c, metric):
+    """c: (3, n_classes) summed counts -> (before, after) score."""
+    n, c0, c1 = c
+    if metric == 'accuracy':
+        return (c0.sum() / n.sum(), c1.sum() / n.sum()) if n.sum() else (np.nan, np.nan)
+    seen = n > 0                          # balanced accuracy: mean recall over classes present
+    return (c0[seen] / n[seen]).mean(), (c1[seen] / n[seen]).mean()
+
+
+def bootstrap_change(y, pred0, pred1, groups, n_classes, mask=None, metric='balanced', n_boot=None, seed=0):
+    """Paired bootstrap over prompt_id of (after - before); returns the 95% interval [low, high]."""
+    G = group_counts(y, pred0, pred1, groups, n_classes, mask)
+    rng = np.random.default_rng(seed)
+    diffs = np.empty(n_boot or N_BOOT)
+    for b in range(len(diffs)):
+        s0, s1 = score_from_counts(G[rng.integers(0, len(G), len(G))].sum(0), metric)
+        diffs[b] = s1 - s0
+    lo, hi = np.nanpercentile(diffs, [2.5, 97.5])
+    return [float(lo), float(hi)]
+
+
+def cut256_cv(train, feats160, paired160, spec, build_54_matrix, model_json, run_glm_fn=run_glm, log=print):
+    labels = sorted(train.model.unique())
+    n_cls = len(labels)
+    ids = train.id.astype(str).tolist()
+    y = train.model.map({l: i for i, l in enumerate(labels)}).to_numpy(np.int64)
+    folds = grouped_folds(train.prompt_id.astype(str).to_numpy())
+    from sklearn.metrics import balanced_accuracy_score as bacc
+
+    X_before = build_X(feats160, paired160, ids, spec, build_54_matrix)
+    P0 = oof_probs(X_before, y, folds, n_cls)
+    pred0 = P0.argmax(1)
+    hard, gap = sibling_hard(np.log(P0), labels)
+
+    tpc = model_json.get('tok_per_char', 0.235)
+    n_tok = est_tokens(train.text, tpc)
+    long_hard = hard & (n_tok > CUT_BEFORE - 10)      # shorter ones are never cut, so 256 changes nothing
+    check = np.flatnonzero(hard & (n_tok < CUT_BEFORE - 40))[:CHECK_N]
+    log(f'train {len(ids)} texts, {len(np.unique(train.prompt_id))} prompts, {N_FOLDS} grouped folds')
+
+    # 1) small check run first: uncut texts must come back with the dataset's features
+    if len(check):
+        t0 = time.time()
+        feats_c, paired_c = run_glm_fn(train.iloc[check][['id', 'text']].astype({'id': str}), CUT_AFTER, OUT_DIR / 'check256', model_json)
+        worst = feature_mismatch(build_X(feats_c, paired_c, [ids[i] for i in check], spec, build_54_matrix), X_before[check])
+        log(f'check on {len(check)} uncut texts: worst feature relative difference {worst:.1e} ({time.time() - t0:.0f}s)')
+        assert worst < 1e-2, 'the re-read features differ from the PB115 train features, so before/after are not comparable'
+        budget = GPU_BUDGET_S - (time.time() - t0)
+    else:
+        log('check skipped: no short hard texts')
+        budget = GPU_BUDGET_S
+
+    # 2) the long re-read, hardest (smallest gap) first, inside the budget left
+    reread, est_s = plan_reread(long_hard, gap, n_tok, budget, model_json.get('prefix_rows', 13))
+    log(f'sibling-hard: {int(hard.sum())}, of which long enough to be cut: {int(long_hard.sum())}, re-read at {CUT_AFTER}: {len(reread)}')
+    log(f'estimated GLM time for the re-read: {est_s / 3600:.1f} h')
+    X_after = X_before.copy()
+    if len(reread):
+        feats256, paired256 = run_glm_fn(train.iloc[reread][['id', 'text']].astype({'id': str}), CUT_AFTER, OUT_DIR / 'run256', model_json)
+        X_after[reread] = build_X(feats256, paired256, [ids[i] for i in reread], spec, build_54_matrix)
+    P1 = oof_probs(X_after, y, folds, n_cls)
+    pred1 = P1.argmax(1)
+    groups = train.prompt_id.astype(str).to_numpy()
+    ci_ba = bootstrap_change(y, pred0, pred1, groups, n_cls)
+    ci_hard = bootstrap_change(y, pred0, pred1, groups, n_cls, mask=hard, metric='accuracy')
+
+    names = target_classes(labels)
+    res = dict(
+        balanced_accuracy_before=float(bacc(y, pred0)), balanced_accuracy_after=float(bacc(y, pred1)),
+        hard_subset_accuracy_before=float((pred0[hard] == y[hard]).mean()) if hard.any() else float('nan'),
+        hard_subset_accuracy_after=float((pred1[hard] == y[hard]).mean()) if hard.any() else float('nan'),
+        n_train=len(ids), n_hard=int(hard.sum()), n_reread=len(reread),
+        balanced_accuracy_change_ci95=ci_ba, hard_subset_accuracy_change_ci95=ci_hard,
+        recall_before=recall_by_class(y, pred0, labels, names), recall_after=recall_by_class(y, pred1, labels, names))
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    np.savez(OUT_DIR / 'oof.npz', ids=np.asarray(ids, dtype='U'), prompt_id=train.prompt_id.astype(str).to_numpy().astype('U'),
+             y=y, labels=np.asarray(labels, dtype='U'), p_before=P0, p_after=P1)   # read by the decoding cell
+    (OUT_DIR / 'cut256_cv.json').write_text(json.dumps(res, indent=1))
+
+    log('')
+    log(f"balanced accuracy, PB115 head, grouped CV: before {res['balanced_accuracy_before']:.4f}  after {res['balanced_accuracy_after']:.4f}  "
+        f"change {res['balanced_accuracy_after'] - res['balanced_accuracy_before']:+.4f}")
+    log(f"  95% interval of the change (bootstrap over prompt_id, {N_BOOT} resamples): {ci_ba[0]:+.4f} to {ci_ba[1]:+.4f}")
+    log(f"accuracy on the {res['n_hard']} sibling-hard texts: before {res['hard_subset_accuracy_before']:.4f}  after {res['hard_subset_accuracy_after']:.4f}")
+    log(f"  95% interval of the change: {ci_hard[0]:+.4f} to {ci_hard[1]:+.4f}")
+    log(f"{'model':28s} recall before  after  change")
+    for n in names:
+        b, a = res['recall_before'][n], res['recall_after'][n]
+        log(f'{n:28s} {b:13.3f} {a:6.3f} {a - b:+7.3f}')
+    return res
+
+
+if os.getenv('KAGGLE_IS_COMPETITION_RERUN') is None:
+    sys.path[:0] = [str(V1_DIR), '/kaggle/working']
+    import v1_stage as _v1s
+    _model = json.loads((V1_DIR / 'll_model.json').read_text())
+    assert _model['max_text_tokens'] == CUT_BEFORE, _model['max_text_tokens']
+    _spec = json.loads((Path(PB115_DIR) / 'spec.json').read_text())
+    _train = pd.read_csv(os.path.join(DATA, 'train.csv'), dtype={'id': str, 'prompt_id': str})
+    _f160 = {t: pd.read_csv(Path(PB115_DIR) / f'{t}_features.csv', dtype={'id': str}).set_index('id') for t in ('flash', 'glm53')}
+    _p160 = pd.read_parquet(Path(PB115_DIR) / 'paired_token_features.parquet')
+    _p160.index = _p160.index.astype(str)
+    cut256_cv(_train, _f160, _p160, _spec, _v1s.build_54_matrix, _model)
