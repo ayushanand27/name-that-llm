@@ -2,23 +2,46 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push or fetch", required: true, default: push, type: choice, options: [push, fetch]}
+      action: {description: "push, fetch, or probe (test what the token may do)", required: true, default: push, type: choice, options: [push, fetch, probe]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
+permissions:
+  contents: read
 jobs:
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      - run: pip install kaggle pytest && python -m pytest -q test_kaggle_runner.py
+      - run: |
+          pip install --only-binary=:all: kaggle==2.2.5 six==1.17.0 pytest==9.0.1
+          python -m pytest -q test_kaggle_runner.py
+      - name: check secrets are set
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          [ -n "$KAGGLE_USERNAME" ] || { echo "::error::repo secret KAGGLE_USERNAME is missing or empty"; exit 1; }
+          [ -n "$KAGGLE_API_TOKEN" ] || { echo "::error::repo secret KAGGLE_API_TOKEN is missing or empty"; exit 1; }
       - name: push
         if: inputs.action == 'push'
-        run: python kaggle_runner.py run --src mathleteutd/name-that-llm-pb115-coverage-sibling-odds --slug "${{ inputs.slug }}" --cells cut256_cv_cell.txt decode_cell.txt --no-wait
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          SLUG: ${{ inputs.slug }}
+        run: python kaggle_runner.py run --src mathleteutd/name-that-llm-pb115-coverage-sibling-odds --slug "$SLUG" --cells cut256_cv_cell.txt decode_cell.txt --no-wait
       - name: fetch
         if: inputs.action == 'fetch'
-        run: python kaggle_runner.py fetch --ref "${{ inputs.slug }}"
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          SLUG: ${{ inputs.slug }}
+        run: python kaggle_runner.py fetch --ref "$SLUG"
+
+      - name: probe
+        if: inputs.action == 'probe'
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: python kaggle_runner.py probe

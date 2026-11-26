@@ -26,9 +26,35 @@ def test_fetch_not_finished(monkeypatch,capsys):
     import kaggle_runner as k,argparse
     monkeypatch.setattr(k,"sh",lambda c,check=True:'status "KernelWorkerStatus.RUNNING"')
     k.cmd_fetch(argparse.Namespace(ref="me/x",work="w",wait=False));assert "not finished" in capsys.readouterr().out
-def test_owner_from_env():
+def test_owner_from_env_when_cli_fails():
     import kaggle_runner as k
     assert k.kaggle_owner(run=lambda c:1/0,env={"KAGGLE_USERNAME":" me "})=="me"
+def test_owner_cli_beats_env():
+    import kaggle_runner as k
+    assert k.kaggle_owner(run=lambda c:"- username: ayushanand2327\n",env={"KAGGLE_USERNAME":"AyushAnand2327"})=="ayushanand2327"
+def test_owner_cli_none_uses_env():
+    import kaggle_runner as k
+    assert k.kaggle_owner(run=lambda c:"- username: None\n",env={"KAGGLE_USERNAME":"me"})=="me"
+def test_owner_nothing_raises():
+    import kaggle_runner as k, pytest
+    with pytest.raises(RuntimeError):
+        k.kaggle_owner(run=lambda c:"",env={})
 def test_owner_from_cli():
     import kaggle_runner as k
     assert k.kaggle_owner(run=lambda c:"username: bob\nx: y",env={})=="bob"
+
+def test_check_sources_lists_unreadable():
+    import kaggle_runner as k
+    def run(cmd):
+        if cmd[-1] == "x/private":
+            raise RuntimeError("cmd failed:\n\n403 Client Error: Forbidden")
+        return "ok"
+    md = {"dataset_sources": ["a/ok", "x/private"], "competition_sources": ["name-that-llm"], "model_sources": []}
+    bad = k.check_sources(md, run=run)
+    assert [(b[0], b[1]) for b in bad] == [("dataset_sources", "x/private")]
+    assert "403" in bad[0][2]
+
+def test_metadata_drops_source_id_no():
+    import kaggle_runner as k
+    m = k.make_metadata({"id": "rohan/x", "id_no": 12345, "dataset_sources": ["a/b"]}, "me", "my-run")
+    assert "id_no" not in m and m["id"] == "me/my-run" and m["dataset_sources"] == ["a/b"]

@@ -27,6 +27,7 @@ def append_cells(nb, cell_texts):
 def make_metadata(meta, owner, slug, title=None):
     """New kernel metadata from the pulled one: same inputs, GPU on, internet off, private."""
     m = dict(meta)
+    m.pop("id_no", None)  # pulled id_no is the source kernel's number; keeping it makes push try to edit their kernel (403)
     if not re.fullmatch(r"[a-z0-9-]+", slug):
         raise ValueError("slug must be lowercase letters, digits, dashes")
     m.update(id=f"{owner}/{slug}", title=title or slug.replace("-", " "), enable_gpu=True,
@@ -59,10 +60,42 @@ def wait(ref, poll_s=300, max_s=12 * 3600, run=sh):
 
 
 def kaggle_owner(run=sh, env=os.environ):
-    """Kaggle username: KAGGLE_USERNAME if set (needed with the new single-token login), else from the CLI config."""
-    if env.get("KAGGLE_USERNAME"):
-        return env["KAGGLE_USERNAME"].strip()
-    return run(["kaggle", "config", "view"]).split("username:")[-1].split()[0]
+    """Kaggle username. The CLI's own login (the token's real owner) wins, since a kernel id with any other
+    owner is refused with 403. KAGGLE_USERNAME is only a fallback when the CLI can't say."""
+    want = (env.get("KAGGLE_USERNAME") or "").strip()
+    try:
+        out = run(["kaggle", "config", "view"])
+        cli = out.split("username:")[-1].split()[0] if "username:" in out else ""
+    except Exception:
+        cli = ""
+    if cli and cli.lower() != "none":
+        if want and want != cli:
+            print(f"note: KAGGLE_USERNAME differs from the logged-in Kaggle user; using {cli}", flush=True)
+        return cli
+    if want:
+        return want
+    raise RuntimeError("could not tell the Kaggle username; check the KAGGLE_API_TOKEN secret")
+
+
+SOURCE_CHECKS = {
+    "competition_sources": ["kaggle", "competitions", "files"],
+    "dataset_sources": ["kaggle", "datasets", "files"],
+    "kernel_sources": ["kaggle", "kernels", "files"],
+    "model_sources": ["kaggle", "models", "instances", "versions", "files"],
+}
+
+
+def check_sources(md, run=sh):
+    """Read-only probe of every input the kernel uses; returns the ones this account can't read."""
+    bad = []
+    for key, cmd in SOURCE_CHECKS.items():
+        for ref in md.get(key) or []:
+            try:
+                run(cmd + [ref])
+            except Exception as e:
+                last = [l for l in str(e).splitlines() if l.strip()]
+                bad.append((key, ref, " | ".join(last[1:3])[:200]))
+    return bad
 
 
 def cmd_run(a):
@@ -79,7 +112,17 @@ def cmd_run(a):
     (out / md["code_file"]).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
-    print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    print("pushing kernel id:", md["id"], flush=True)
+    try:
+        print(sh(["kaggle", "kernels", "push", "-p", str(out)]))
+    except RuntimeError:
+        print("push refused; checking which inputs this account can't read...", flush=True)
+        bad = check_sources(md)
+        for key, ref, why in bad:
+            print(f"  CAN'T READ {key}: {ref}  ({why})", flush=True)
+        if not bad:
+            print("  every input is readable, so the refusal is about the account or token (e.g. token scope, phone verification)")
+        raise
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
         return
@@ -98,10 +141,32 @@ def cmd_fetch(a):
         print("--- last lines of", f.name); print("".join(f.read_text().splitlines(True)[-60:]))
 
 
+def cmd_probe(a):
+    """Push a one-line private kernel without and then with GPU, report which the account may do, delete both."""
+    owner = kaggle_owner()
+    for gpu in (False, True):
+        slug = "ci-probe-gpu" if gpu else "ci-probe-cpu"
+        d = Path(a.work + "_" + slug); d.mkdir(exist_ok=True)
+        (d / "probe.ipynb").write_text(json.dumps({"cells": [code_cell("print('ok')")], "metadata": {},
+                                                    "nbformat": 4, "nbformat_minor": 5}))
+        md = {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": "probe.ipynb",
+              "language": "python", "kernel_type": "notebook", "is_private": True, "enable_gpu": gpu,
+              "enable_internet": False, "competition_sources": ["name-that-llm"]}
+        (d / "kernel-metadata.json").write_text(json.dumps(md))
+        try:
+            sh(["kaggle", "kernels", "push", "-p", str(d)])
+            print(f"probe {'GPU' if gpu else 'CPU'} push: OK", flush=True)
+            sh(["kaggle", "kernels", "delete", "-y", md["id"]], check=False)
+        except RuntimeError as e:
+            why = [l for l in str(e).splitlines() if l.strip()][1:3]
+            print(f"probe {'GPU' if gpu else 'CPU'} push: REFUSED ({' | '.join(why)[:200]})", flush=True)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(); s = p.add_subparsers(dest="c", required=True)
     r = s.add_parser("run"); r.add_argument("--src", required=True); r.add_argument("--slug", required=True)
     r.add_argument("--cells", nargs="+", required=True); r.add_argument("--work", default="kr_work"); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
     f = s.add_parser("fetch"); f.add_argument("--ref", required=True); f.add_argument("--work", default="kr_work")
     f.add_argument("--wait", action="store_true"); f.set_defaults(f=cmd_fetch)
+    pr = s.add_parser("probe"); pr.add_argument("--work", default="kr_work"); pr.set_defaults(f=cmd_probe)
     a = p.parse_args(); a.f(a)
