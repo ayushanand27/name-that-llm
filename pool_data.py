@@ -43,6 +43,22 @@ def apply_switches(pool, kimi_high_only, drop_flag_kb_proxy, kimi_label="kimi-k3
     return pool[keep].reset_index(drop=True)
 
 
+GEM37_LABEL, GEM37_CUTOFF = "gemini-3.7-flash", "2026-10-08"   # Google has served 3.8 for 3.7 requests since 8 Oct 2026
+
+
+def gem37_after_mask(pool, label=GEM37_LABEL, cutoff=GEM37_CUTOFF):
+    """True for pool rows labelled gemini-3.7-flash with gen_date on or after the cutoff (probably really 3.8).
+    Rows with no date, or a date that doesn't parse, are False (kept): there is nothing to judge them by."""
+    if "gen_date" not in pool.columns:
+        return pd.Series(False, index=pool.index)
+    d = pd.to_datetime(pool.gen_date, errors="coerce", utc=True, format="mixed")
+    return (pool.model == label) & (d >= pd.Timestamp(cutoff, tz="UTC"))
+
+
+def drop_gem37_after(pool, label=GEM37_LABEL, cutoff=GEM37_CUTOFF):
+    return pool[~gem37_after_mask(pool, label, cutoff)].reset_index(drop=True)
+
+
 def cap_per_label(pool, cap, seed):
     """Keeps at most `cap` random rows per label (same seed, same rows), so big labels don't drown small ones."""
     parts = [g.sample(n=min(cap, len(g)), random_state=seed) for _, g in pool.groupby("model", sort=True)]
@@ -63,7 +79,9 @@ class Config:
     use_pool: bool = True
     cap: int = 1500
     kimi_high_only: bool = False
-    drop_flag_kb_proxy: bool = False
+    drop_flag_kb_proxy: bool = True        # Ayush 26 Nov: drop the after-ruling proxy rows from every retrain
+    drop_gem37_after_oct8: bool = False    # switch gained +0.000 on the TF-IDF yardstick, so off by default
+    official_in_train: bool = True         # False = run P: train on pool only, score every official row
     holdout_frac: float = 0.2
     seed: int = 42
     kimi_label: str = "kimi-k3"
@@ -76,14 +94,20 @@ def _frame(df, label_ids, group, is_official):
 
 def build_dataset(official, pool, cfg):
     """Returns (train, holdout, labels). Holdout = only official rows of the held-out prompts.
-    Train = the other official rows, plus (if use_pool) the filtered, de-duplicated, capped pool rows."""
+    Train = the other official rows, plus (if use_pool) the filtered, de-duplicated, capped pool rows.
+    With official_in_train False, train is the pool rows alone and the holdout is every official row."""
     labels = check_labels(official)
     ids = {m: i for i, m in enumerate(labels)}
-    off_tr, off_ho = split_holdout(official, cfg.holdout_frac, cfg.seed)
-    parts = [_frame(off_tr, ids, "off:" + off_tr.prompt_id.astype(str).values, True)]
+    if cfg.official_in_train:
+        off_tr, off_ho = split_holdout(official, cfg.holdout_frac, cfg.seed)
+        parts = [_frame(off_tr, ids, "off:" + off_tr.prompt_id.astype(str).values, True)]
+    else:   # pool only: the model never sees an official row, so its scores on all of them are out-of-fold
+        off_ho, parts = official, []
     if cfg.use_pool:
         p = pool[pool.model.isin(ids)]
         p = apply_switches(p, cfg.kimi_high_only, cfg.drop_flag_kb_proxy, cfg.kimi_label)
+        if cfg.drop_gem37_after_oct8:
+            p = drop_gem37_after(p)
         p = drop_duplicate_texts(p, official)
         p = cap_per_label(p, cfg.cap, cfg.seed)
         parts.append(_frame(p, ids, "pool:" + p.prompt_group.astype(str).values, False))

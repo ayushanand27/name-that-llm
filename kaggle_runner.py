@@ -141,6 +141,9 @@ def cmd_run(a):
     cmd_fetch(argparse.Namespace(ref=md["id"], wait=True, tail=80))
 
 
+FETCH_PATTERN = r"(\.log|(oof|test)_[^/]*\.npz)$"   # log and probabilities only; adapters stay on Kaggle
+
+
 def cmd_fetch(a):
     ref = a.ref if "/" in a.ref else kaggle_owner() + "/" + a.ref
     st = wait(ref) if a.wait else parse_status(sh(["kaggle", "kernels", "status", ref], check=False))
@@ -149,7 +152,7 @@ def cmd_fetch(a):
         print("not finished yet; run fetch again later"); return
     res = Path(WORK + "_out"); res.mkdir(exist_ok=True)
     # only the log and holdout probabilities: adapters and checkpoints are hundreds of MB and stay on Kaggle
-    sh(["kaggle", "kernels", "output", ref, "-p", str(res), "--file-pattern", r"(\.log|oof_[^/]*\.npz)$"], check=False)
+    sh(["kaggle", "kernels", "output", ref, "-p", str(res), "--file-pattern", FETCH_PATTERN], check=False)
     for f in res.glob("*.log"):
         print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
         if st == "error":
@@ -166,11 +169,14 @@ def cmd_fetch(a):
 
 POOL_FILES = ["pool_data.py", "metrics.py", "baseline_tfidf.py", "train_lora.py"]
 POOL_PIP = "transformers==5.24.1 peft==0.22.0 bitsandbytes==0.50.2 accelerate==1.16.0"
-POOL_RUNS = {  # A = official only, B = official + capped pool, final = B on 100% of official rows (no holdout)
+POOL_RUNS = {  # A = official only, B = official + capped pool, P = pool only, final = no holdout
+    # B and probe pin the recipe run B was trained with (proxy rows kept, gemini-3.7 rows kept). B is diagnostics only.
+    # Ayush 26 Nov: every retrain drops the after-ruling proxy rows; the gemini-3.7 date switch stays off.
     "A": "--use_pool 0 --epochs 3",
-    "B": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1",
-    "final": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --holdout_frac 0",
-    "probe": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --probe_only 1",
+    "B": "--use_pool 1 --cap 1500 --kimi_high_only 0 --drop_flag_kb_proxy 0 --drop_gem37_after_oct8 0 --epochs 1",
+    "P": "--use_pool 1 --official_in_train 0 --cap 1500 --kimi_high_only 0 --drop_flag_kb_proxy 1 --drop_gem37_after_oct8 0 --epochs 1",
+    "final": "--use_pool 1 --cap 1500 --kimi_high_only 0 --drop_flag_kb_proxy 1 --drop_gem37_after_oct8 0 --epochs 1 --holdout_frac 0",
+    "probe": "--use_pool 1 --cap 1500 --kimi_high_only 0 --drop_flag_kb_proxy 0 --drop_gem37_after_oct8 0 --epochs 1 --probe_only 1",
 }
 POOL_FIND = """import glob, os, subprocess, sys
 def find(pattern):
@@ -179,6 +185,7 @@ def find(pattern):
     return hits[0]
 TRAIN = find('train.csv')
 POOL = find('ntl_open_pool.parquet')
+TEST = find('test.csv')
 MODEL = os.path.dirname(find('qwen*/**/config.json'))
 print('train', TRAIN, '| pool', POOL, '| model', MODEL, flush=True)
 subprocess.run(['nvidia-smi', '-L'])
@@ -197,7 +204,7 @@ def build_pool_notebook(files, run, n_gpus):
     cells += [code_cell(f"%%writefile {Path(f).name}\n" + Path(f).read_text()) for f in files]
     launch = (POOL_FIND +
               f"cmd = ['torchrun', '--nproc_per_node', '{n_gpus}', 'train_lora.py', '--train_csv', TRAIN, '--pool', POOL,\n"
-              f"       '--model_path', MODEL, '--run_name', '{run}'] + '{pool_run_args(run)}'.split()\n"
+              f"       '--model_path', MODEL, '--test_csv', TEST, '--run_name', '{run}'] + '{pool_run_args(run)}'.split()\n"
               "print(' '.join(cmd), flush=True)\n"
               "rc = subprocess.run(cmd).returncode\n"
               "print('exit code', rc, flush=True)\n"

@@ -58,7 +58,7 @@ def compare_oof(paths, n_boot=2000):
     return out
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_csv", required=True)
     ap.add_argument("--pool", required=True)
@@ -66,18 +66,21 @@ def main():
     ap.add_argument("--use_pool", type=int, default=1)
     ap.add_argument("--cap", type=int, default=1500)
     ap.add_argument("--kimi_high_only", type=int, default=0)
-    ap.add_argument("--drop_flag_kb_proxy", type=int, default=0)
+    ap.add_argument("--drop_flag_kb_proxy", type=int, default=1)
+    ap.add_argument("--drop_gem37_after_oct8", type=int, default=0, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
+    ap.add_argument("--official_in_train", type=int, default=1, help="0 = train on the pool only and score every official row")
     ap.add_argument("--seed", type=int, default=42)
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     cfg = pdm.Config(use_pool=bool(a.use_pool), cap=a.cap, kimi_high_only=bool(a.kimi_high_only),
-                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), seed=a.seed)
+                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), drop_gem37_after_oct8=bool(a.drop_gem37_after_oct8),
+                     official_in_train=bool(a.official_in_train), seed=a.seed)
     official = pd.read_csv(a.train_csv, dtype={"id": str, "prompt_id": str})
     pool = pd.read_parquet(a.pool) if cfg.use_pool else official.iloc[:0]
     train, hold, labels = pdm.build_dataset(official, pool, cfg)
     print(f"train rows {len(train)} (official {int(train.is_official.sum())}), holdout rows {len(hold)}", flush=True)
     probs = fit_predict(train, hold, len(labels), a.seed)
     print("\n".join(report_lines(hold, probs, labels)))
-    save_oof(a.out, hold, probs, labels, run_name=f"tfidf_pool{a.use_pool}_kimi{a.kimi_high_only}")
+    save_oof(a.out, hold, probs, labels, run_name=f"tfidf_pool{a.use_pool}_kimi{a.kimi_high_only}_g37drop{a.drop_gem37_after_oct8}")
 
 
 if __name__ == "__main__":

@@ -98,3 +98,44 @@ def test_logged_loss_is_not_scaled_by_grad_accum(tmp_path, capsys):
     line = [l for l in out.splitlines() if l.startswith("first losses")][0]
     first = float(line.split("[")[1].split(",")[0])
     assert abs(first - np.log(18)) < 0.01      # zero head: every class equal, loss = ln 18, not 2 x ln 18
+
+
+def learnable_data(tmp_path, n_prompts=10):
+    """Official texts carry their label word, so a working model must score well above chance on the holdout."""
+    off = fake_official(n_prompts=n_prompts)
+    off["text"] = [f"{m} style words {m} " + " ".join(["words"] * (i % 7)) for i, m in enumerate(off.model)]
+    off.to_csv(tmp_path / "train.csv", index=False)
+    fake_pool().to_parquet(tmp_path / "pool.parquet")
+    return off
+
+
+def test_holdout_probabilities_line_up_with_their_ids(tmp_path):
+    # transformers 5 length-groups the predict loader too, which shuffled run B's probabilities (BA 0.046)
+    tiny_model(tmp_path / "model"); learnable_data(tmp_path)
+    args = base_args(tmp_path, "B") + ["--use_pool", "0", "--epochs", "8", "--lr", "1e-2", "--lora_r", "8"]
+    assert tl.main(args) == 0
+    d = np.load(tmp_path / "out" / "oof_B.npz")
+    assert (d["probs"].argmax(1) == d["y"]).mean() > 0.6
+
+
+def test_pool_only_run_scores_all_official_rows_and_the_test_set(tmp_path):
+    tiny_model(tmp_path / "model"); off = learnable_data(tmp_path)
+    test = off.iloc[:7][["id", "text"]].assign(id=lambda d: "t" + d.id)
+    test.to_csv(tmp_path / "test.csv", index=False)
+    args = base_args(tmp_path, "P") + ["--official_in_train", "0", "--test_csv", str(tmp_path / "test.csv")]
+    assert tl.main(args) == 0
+    d = np.load(tmp_path / "out" / "oof_P.npz")
+    assert d["probs"].shape == (len(off), 18) and sorted(d["ids"]) == sorted(off.id)
+    t = np.load(tmp_path / "out" / "test_P.npz")
+    assert t["probs"].shape == (7, 18) and list(t["ids"]) == list(test.id) and len(t["labels"]) == 18
+
+
+def test_rows_agree_and_load_test(tmp_path):
+    assert tl.rows_agree(np.eye(3), np.eye(3)) == 1.0
+    assert tl.rows_agree(np.eye(3), np.eye(3)[[1, 2, 0]]) == 0.0
+    import pandas as pd
+    pd.DataFrame({"id": ["a"], "text": ["x"], "extra": [1]}).to_csv(tmp_path / "t.csv", index=False)
+    pd.DataFrame({"id": ["a"], "body": ["x"]}).to_csv(tmp_path / "bad.csv", index=False)
+    assert list(tl.load_test(tmp_path / "t.csv").columns) == ["id", "text"]
+    msgs = []
+    assert tl.load_test(tmp_path / "bad.csv", msgs.append) is None and "skipping test scoring" in msgs[0]

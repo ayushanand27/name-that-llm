@@ -25,3 +25,16 @@ def test_baseline_runs_on_fake_data():
     assert probs.shape == (len(hold), 18)
     assert np.allclose(probs.sum(1), 1)
     assert (probs.argmax(1) == hold.label.values).mean() > 0.9
+
+
+def test_pool_only_tfidf_scores_every_official_row(tmp_path):
+    off = fake_official(n_prompts=10)
+    off["text"] = [f"{m} style words {m} {i}" for i, m in enumerate(off.model)]
+    pool = fake_pool()
+    pool["text"] = [f"{m} style words {m} p{i}" for i, m in enumerate(pool.model)]
+    tr, pq, out = tmp_path / "train.csv", tmp_path / "pool.parquet", tmp_path / "oof.npz"
+    off.to_csv(tr, index=False)
+    pool.to_parquet(pq)
+    bt.main(["--train_csv", str(tr), "--pool", str(pq), "--official_in_train", "0", "--out", str(out)])
+    d = np.load(out, allow_pickle=False)
+    assert sorted(d["ids"].tolist()) == sorted(off.id.astype(str).tolist())
