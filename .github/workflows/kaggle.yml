@@ -51,5 +51,5 @@ jobs:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          pip install --only-binary=:all: pyarrow==22.0.0
+          pip install --only-binary=:all: pyarrow==22.0.0 pandas==2.3.3 numpy==2.3.5
           python openpool_peek.py
