@@ -26,7 +26,9 @@
 ## STATE
 - Running: nothing. Run P's adapter and OOF stay in the Kaggle notebook ayush-pool-p.
 - PRs #1, #2, #4 stay open. Nothing merged. Sonar gate on #4 fails on a known false positive.
-- "Read top notebooks" task cancelled.
+- "Read top notebooks" task cancelled. Its branch claude/project-thread-2eu07g has one unmerged
+  commit (research_pull.py + a read-only research step in kaggle.yml), no PR: left unmerged,
+  delete or reuse in January.
 
 ## JANUARY PLAN (start Sat 2 Jan 2027; final deadline Wed 13 Jan)
 - 2-3 Jan: list every public notebook at or above the top public score, and every public
