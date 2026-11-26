@@ -65,7 +65,8 @@ def test_pool_run_args():
     assert "--use_pool 0" in k.pool_run_args("A") and "--epochs 3" in k.pool_run_args("A")
     b = k.pool_run_args("B")
     assert "--use_pool 1" in b and "--cap 1500" in b and "--kimi_high_only 0" in b
-    assert "--kimi_high_only 1" in k.pool_run_args("C")
+    assert "--holdout_frac 0" in k.pool_run_args("final") and "--use_pool 1" in k.pool_run_args("final")
+    assert "C" not in k.POOL_RUNS
     assert "--probe_only 1" in k.pool_run_args("probe") and "--use_pool 1" in k.pool_run_args("probe")
     import pytest
     with pytest.raises(KeyError):
@@ -101,6 +102,6 @@ def test_stdout_lines_from_kaggle_log():
 
 def test_pool_notebook_cells_are_valid_python(tmp_path):
     import ast, kaggle_runner as k
-    nb = k.build_pool_notebook([], "C", n_gpus=1)
+    nb = k.build_pool_notebook([], "final", n_gpus=1)
     ast.parse("".join(nb["cells"][-1]["source"]))
-    assert "--kimi_high_only" in "".join(nb["cells"][-1]["source"])
+    assert "--holdout_frac" in "".join(nb["cells"][-1]["source"])

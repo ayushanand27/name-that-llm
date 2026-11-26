@@ -146,10 +146,10 @@ def cmd_fetch(a):
 
 POOL_FILES = ["pool_data.py", "metrics.py", "baseline_tfidf.py", "train_lora.py"]
 POOL_PIP = "transformers==5.24.1 peft==0.22.0 bitsandbytes==0.50.2 accelerate==1.16.0"
-POOL_RUNS = {  # A = official only, B = official + capped pool, C = B with pool kimi kept only at gen_reasoning high
+POOL_RUNS = {  # A = official only, B = official + capped pool, final = B on 100% of official rows (no holdout)
     "A": "--use_pool 0 --epochs 3",
     "B": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1",
-    "C": "--use_pool 1 --cap 1500 --kimi_high_only 1 --epochs 1",
+    "final": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --holdout_frac 0",
     "probe": "--use_pool 1 --cap 1500 --kimi_high_only 0 --epochs 1 --probe_only 1",
 }
 POOL_FIND = """import glob, os, subprocess, sys
@@ -166,7 +166,7 @@ subprocess.run(['nvidia-smi', '-L'])
 
 
 def pool_run_args(run):
-    """Command-line flags for run A, B, C or the speed probe (KeyError for anything else)."""
+    """Command-line flags for run A, B, final or the speed probe (KeyError for anything else)."""
     return POOL_RUNS[run]
 
 
