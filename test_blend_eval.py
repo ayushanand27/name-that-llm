@@ -141,3 +141,14 @@ def test_report_prints_no_text_or_ids(tmp_path, capsys):
     b = make(tmp_path / "b.npz", ["secret-id-1", "secret-id-2", "secret-id-3"], y, onehot(y))
     be.main([a, b, "--n_boot", "50"])
     assert "secret-id" not in capsys.readouterr().out
+
+
+def test_lora_off_prefix_groups_match_plain_prompt_ids(tmp_path):
+    # the LoRA and TF-IDF runs save groups as "off:<prompt_id>"; the head saves the bare prompt_id
+    a = make(tmp_path / "a.npz", ["1", "2"], [0, 1], onehot([0, 1]), groups=["p1", "p2"])
+    b = make(tmp_path / "b.npz", ["1", "2"], [0, 1], onehot([0, 1]), groups=["off:p1", "off:p2"])
+    d = be.align([be.load(a), be.load(b)])
+    assert list(d["groups"]) == ["p1", "p2"]
+    c = make(tmp_path / "c.npz", ["1", "2"], [0, 1], onehot([0, 1]), groups=["off:p1", "off:p9"])
+    with pytest.raises(SystemExit):
+        be.align([be.load(a), be.load(c)])

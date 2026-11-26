@@ -2,7 +2,7 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect, head_cv, gem37, free_models, scan]}
+      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect, head_cv, gem37, free_models, scan, blend_p]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
       run:    {description: "pool_train only: probe (speed test), A, B, P (pool only) or final", required: false, default: probe, type: choice, options: [probe, A, B, P, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
@@ -117,6 +117,28 @@ jobs:
           python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --drop_gem37_after_oct8 0 --out oof_g37_off.npz | grep -E "holdout|gemini-3\.[678]-flash"
           python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --drop_gem37_after_oct8 1 --out oof_g37_on.npz | grep -E "holdout|gemini-3\.[678]-flash"
           python -c "import baseline_tfidf as b; print('\n'.join(b.compare_oof(['oof_g37_off.npz','oof_g37_on.npz'])))"
+      - name: blend_p
+        if: inputs.action == 'blend_p'
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          SLUG: ${{ inputs.slug }}
+        run: |
+          pip install --only-binary=:all: pyarrow==22.0.0 pandas==2.3.3 numpy==2.3.5 scipy==1.16.3 scikit-learn==1.7.2 lightgbm==4.6.0
+          kaggle datasets download lumibee/ntl-prefixb-full-115 -p pb115 -q --unzip
+          kaggle datasets download crtproduction/name-that-llm-open-pool -f ntl_open_pool.parquet -p pool -q
+          kaggle competitions download name-that-llm -f train.csv -p comp -q
+          for z in pool/*.zip comp/*.zip; do [ -f "$z" ] && unzip -o -q "$z" -d "$(dirname "$z")"; done
+          python kaggle_runner.py fetch --ref "$SLUG" | grep -E "^status|holdout balanced|saved"
+          P=$(find kr_work_out -name 'oof_P.npz' | head -1); [ -n "$P" ] || { echo "::error::oof_P.npz not in the run's output"; exit 1; }
+          find kr_work_out -name 'test_*.npz' -printf "test file found: %f\n"
+          echo "== TF-IDF, pool only, proxy rows dropped (scores every official row)"
+          python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --official_in_train 0 --out oof_tfidf_P.npz | grep holdout
+          echo "== yardstick: head + TF-IDF features (base) vs head + TF-IDF + run P features (new)"
+          python head_cv.py --pb_dir pb115 --train_csv comp/train.csv --base_block oof_tfidf_P.npz --block "$P" --out oof_head_t.npz
+          echo "== probability blend: head, TF-IDF, run P"
+          python head_cv.py --pb_dir pb115 --train_csv comp/train.csv --out oof_head.npz > /dev/null
+          python blend_eval.py oof_head.npz oof_tfidf_P.npz "$P" --names head tfidf P
       - name: free_models
         if: inputs.action == 'free_models'
         run: python list_free_models.py

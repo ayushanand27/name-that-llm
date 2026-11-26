@@ -60,7 +60,7 @@ def align(runs):
         if (r["y"][s] != y).any():
             raise SystemExit(f"{r['path']}: true label differs on {(r['y'][s] != y).sum()} shared rows")
         if "groups" in r:
-            g = r["groups"][s].astype(str)
+            g = np.array([x[4:] if x.startswith("off:") else x for x in r["groups"][s].astype(str)])  # LoRA/TF-IDF save "off:<prompt_id>"
             if groups is not None and (g != groups).any():
                 raise SystemExit(f"{r['path']}: prompt groups differ from another file on shared rows")
             groups = g

@@ -136,10 +136,22 @@ def save_oof(path, ids, groups, y, probs, labels, run):
              probs=np.asarray(probs, dtype=np.float32), labels=np.asarray(labels, dtype="U"), run=np.asarray(run))
 
 
+def load_block(path, ids, labels):
+    """A saved OOF file's probabilities, in the row order of ids; every official row must have one."""
+    with np.load(path, allow_pickle=False) as z:
+        if [str(x) for x in z["labels"]] != labels:
+            raise SystemExit(f"{path}: labels differ from train.csv's sorted labels")
+        idx = pd.Series(np.arange(len(z["ids"])), index=z["ids"].astype(str)).reindex(ids)
+        if idx.isna().any():
+            raise SystemExit(f"{path}: {int(idx.isna().sum())} official rows have no prediction")
+        return z["probs"][idx.to_numpy(int)]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--pb_dir", required=True)
     ap.add_argument("--train_csv", required=True)
+    ap.add_argument("--base_block", nargs="*", default=[], help="OOF .npz files added as features on both sides (the yardstick)")
     ap.add_argument("--block", nargs="*", default=[], help="OOF .npz files whose probs are added as a feature block")
     ap.add_argument("--out", default="oof_head_pb115.npz")
     ap.add_argument("--n_boot", type=int, default=2000)
@@ -149,17 +161,13 @@ def main(argv=None):
     y = tr.model.map({l: i for i, l in enumerate(labels)}).to_numpy(np.int64)
     g = tr.prompt_id.astype(str).to_numpy()
     X, _ = build_X(a.pb_dir, tr.id.tolist())
+    for path in a.base_block:
+        X = add_features(X, load_block(path, tr.id, labels))
     base = oof_probs(X, y, g, len(labels))
-    save_oof(a.out, tr.id, g, y, base, labels, "pb115_head")
+    save_oof(a.out, tr.id, g, y, base, labels, "pb115_head" + "".join("+base_block" for _ in a.base_block))
     Xn = X
     for path in a.block:
-        with np.load(path, allow_pickle=False) as z:
-            if [str(x) for x in z["labels"]] != labels:
-                raise SystemExit(f"{path}: labels differ from train.csv's sorted labels")
-            idx = pd.Series(np.arange(len(z["ids"])), index=z["ids"].astype(str)).reindex(tr.id)
-            if idx.isna().any():
-                raise SystemExit(f"{path}: {int(idx.isna().sum())} official rows have no prediction")
-            Xn = add_features(Xn, z["probs"][idx.to_numpy(int)])
+        Xn = add_features(Xn, load_block(path, tr.id, labels))
     new = oof_probs(Xn, y, g, len(labels)) if a.block else base
     print("\n".join(report_lines(compare(base, new, y, g, labels, n_boot=a.n_boot), labels)))
     return 0

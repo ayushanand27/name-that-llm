@@ -120,3 +120,17 @@ def test_report_lines_are_numbers_and_labels_only():
     lines = hc.report_lines(hc.compare(p, p, y, g, LABELS, n_boot=100), LABELS)
     text = "\n".join(lines)
     assert "balanced accuracy" in text and "DROP" in text and "mix-ups" in text
+
+
+def test_base_block_goes_into_both_sides_and_block_only_into_new(tmp_path, monkeypatch):
+    tr = pd.DataFrame({"id": ["1", "2", "3", "4"], "prompt_id": ["p1", "p1", "p2", "p2"], "model": ["a", "b", "c", "a"]})
+    tr.to_csv(tmp_path / "train.csv", index=False)
+    for name in ("t", "p"):
+        np.savez(tmp_path / f"{name}.npz", ids=np.array(["4", "3", "2", "1"]), labels=np.array(LABELS),
+                 probs=np.full((4, 3), 1 / 3), y=np.array([0, 2, 1, 0]), groups=np.array(["off:p2"] * 2 + ["off:p1"] * 2))
+    monkeypatch.setattr(hc, "build_X", lambda pb, ids: (np.zeros((len(ids), 5)), None))
+    widths = []
+    monkeypatch.setattr(hc, "oof_probs", lambda X, y, g, k: widths.append(X.shape[1]) or np.eye(k)[y])
+    hc.main(["--pb_dir", "x", "--train_csv", str(tmp_path / "train.csv"), "--base_block", str(tmp_path / "t.npz"),
+             "--block", str(tmp_path / "p.npz"), "--out", str(tmp_path / "o.npz"), "--n_boot", "20"])
+    assert widths == [8, 11]
