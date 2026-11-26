@@ -89,6 +89,39 @@ def length_grouping(training_args_cls):
     return {"group_by_length": True} if "group_by_length" in params else {}
 
 
+def in_order_trainer(trainer_cls):
+    """transformers 5 length-groups the predict loader as well as the train loader, so predictions came back
+    shuffled against their rows (run B scored 0.046). This Trainer keeps the grouping for training only."""
+    class InOrder(trainer_cls):
+        def _get_eval_sampler(self, eval_dataset):
+            names = [n for n in ("train_sampling_strategy", "group_by_length") if hasattr(self.args, n)]
+            saved = {n: getattr(self.args, n) for n in names}
+            for n in names:
+                setattr(self.args, n, "random" if n == "train_sampling_strategy" else False)
+            try:
+                return super()._get_eval_sampler(eval_dataset)
+            finally:
+                for n, v in saved.items():
+                    setattr(self.args, n, v)
+    return InOrder
+
+
+def rows_agree(direct_logits, probs):
+    """Share of rows where a direct forward pass and the saved probabilities pick the same label."""
+    return float((np.asarray(direct_logits).argmax(1) == np.asarray(probs)[: len(direct_logits)].argmax(1)).mean())
+
+
+def load_test(path, say=print):
+    """Test rows (id, text) to score, or None with a message if the file lacks those columns."""
+    import pandas as pd
+    t = pd.read_csv(path, dtype={"id": str})
+    missing = {"id", "text"} - set(t.columns)
+    if missing:
+        say(f"test file has no {sorted(missing)} column; skipping test scoring (columns: {list(t.columns)})")
+        return None
+    return t[["id", "text"]].reset_index(drop=True)
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_csv", required=True)
@@ -101,8 +134,10 @@ def parse_args(argv=None):
     ap.add_argument("--use_pool", type=int, default=1)
     ap.add_argument("--cap", type=int, default=1500)
     ap.add_argument("--kimi_high_only", type=int, default=0)
-    ap.add_argument("--drop_flag_kb_proxy", type=int, default=0)
-    ap.add_argument("--drop_gem37_after_oct8", type=int, default=1, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
+    ap.add_argument("--drop_flag_kb_proxy", type=int, default=1, help="drop pool rows made through the Benchmarks proxy after the ruling")
+    ap.add_argument("--drop_gem37_after_oct8", type=int, default=0, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
+    ap.add_argument("--official_in_train", type=int, default=1, help="0 = run P: pool only, score every official row")
+    ap.add_argument("--test_csv", default="", help="also score this file (id, text) and save test_<run>.npz")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--holdout_frac", type=float, default=0.2, help="0 = final retrain on 100% of official rows")
     ap.add_argument("--max_len", type=int, default=256)
@@ -139,7 +174,7 @@ def main(argv=None):
 
     cfg = pdm.Config(use_pool=bool(a.use_pool), cap=a.cap, kimi_high_only=bool(a.kimi_high_only),
                      drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), drop_gem37_after_oct8=bool(a.drop_gem37_after_oct8), seed=a.seed,
-                     holdout_frac=a.holdout_frac)
+                     holdout_frac=a.holdout_frac, official_in_train=bool(a.official_in_train))
     official = pd.read_csv(a.train_csv, dtype={"id": str, "prompt_id": str})
     pool = pd.read_parquet(a.pool) if cfg.use_pool else official.iloc[:0]
     train, hold, labels = pdm.build_dataset(official, pool, cfg)
@@ -241,7 +276,7 @@ def main(argv=None):
         save_steps=a.save_steps, save_total_limit=2, report_to="none", seed=a.seed,
         dataloader_num_workers=2 if gpu else 0, ddp_find_unused_parameters=False, gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False, **length_grouping(TrainingArguments))
-    trainer = Trainer(model=model, args=targs, train_dataset=ds_tr, data_collator=DataCollatorWithPadding(tok),
+    trainer = in_order_trainer(Trainer)(model=model, args=targs, train_dataset=ds_tr, data_collator=DataCollatorWithPadding(tok),
                       callbacks=[Guard()])
     # The classifier's loss is a plain mean and ignores Trainer's token count, so let Trainer divide by grad_accum
     # itself; otherwise loss and gradients come out grad_accum (x GPUs) times too big (probe showed 4 x ln 18).
@@ -268,11 +303,33 @@ def main(argv=None):
         say(f"no holdout (final retrain): saved adapter in {out}; total {(time.time() - t_start) / 3600:.2f} h")
         return 0
     logits = trainer.predict(ds_ho).predictions
+    ok = True
     if is_main:
         probs = softmax(np.asarray(logits, dtype=np.float64))
-        say("\n".join(bt.report_lines(hold, probs, labels)))
-        bt.save_oof(out / f"oof_{a.run_name}.npz", hold, probs, labels, a.run_name)
-        say(f"saved adapter and oof_{a.run_name}.npz in {out}; total {(time.time() - t_start) / 3600:.2f} h")
+        k = min(16, len(hold))
+        dev = next(model.parameters()).device
+        with torch.no_grad(), torch.autocast(dev.type, dtype=torch.float16, enabled=gpu):
+            enc = tok(hold.text.iloc[:k].tolist(), truncation=True, max_length=a.max_len, padding=True, return_tensors="pt").to(dev)
+            direct = model(**enc).logits.float().cpu().numpy()
+        agree = rows_agree(direct, probs)
+        say(f"order check: direct forward and saved probabilities agree on {agree:.2f} of the first {k} holdout rows")
+        ok = agree >= 0.75
+        if ok:
+            say("\n".join(bt.report_lines(hold, probs, labels)))
+            bt.save_oof(out / f"oof_{a.run_name}.npz", hold, probs, labels, a.run_name)
+            say(f"saved oof_{a.run_name}.npz ({len(hold)} rows)")
+        else:
+            say("ABORT: saved probabilities don't line up with their rows; nothing saved")
+    test = load_test(a.test_csv, say) if a.test_csv else None
+    if test is not None:    # every GPU process must take part in predict, so this runs even after a failed check
+        test_logits = trainer.predict(DS(test, with_labels=False)).predictions
+        if is_main and ok:
+            np.savez(out / f"test_{a.run_name}.npz", ids=np.array(test.id.astype(str).tolist()),
+                     probs=softmax(np.asarray(test_logits, dtype=np.float64)), labels=np.array(labels), run=a.run_name)
+            say(f"saved test_{a.run_name}.npz ({len(test)} test rows)")
+    if not ok:
+        return 3
+    say(f"saved adapter in {out}; total {(time.time() - t_start) / 3600:.2f} h")
     return 0
 
 
