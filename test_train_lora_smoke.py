@@ -1,0 +1,53 @@
+"""End-to-end CPU run of train_lora.main on a tiny random Qwen3 and tiny fake data (no 4-bit, no GPU)."""
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+transformers = pytest.importorskip("transformers")
+pytest.importorskip("peft")
+
+import train_lora as tl
+from test_pool_data import fake_official, fake_pool
+
+
+def tiny_model(path):
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForSequenceClassification
+    words = ["[PAD]", "[UNK]"] + [f"m{i:02d}" for i in range(18)] + "official pool text style words".split() + [str(i) for i in range(400)]
+    t = Tokenizer(models.WordLevel({w: i for i, w in enumerate(words)}, unk_token="[UNK]"))
+    t.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok = PreTrainedTokenizerFast(tokenizer_object=t, pad_token="[PAD]", unk_token="[UNK]")
+    cfg = Qwen3Config(vocab_size=len(words), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                      num_attention_heads=4, num_key_value_heads=2, head_dim=8, num_labels=18, pad_token_id=0)
+    Qwen3ForSequenceClassification(cfg).save_pretrained(path)
+    tok.save_pretrained(path)
+
+
+def write_data(tmp_path):
+    off = fake_official(n_prompts=10)
+    off["text"] = [f"{m} style words {m} {i % 50}" for i, m in enumerate(off.model)]
+    off.to_csv(tmp_path / "train.csv", index=False)
+    fake_pool().to_parquet(tmp_path / "pool.parquet")
+
+
+def test_main_end_to_end(tmp_path):
+    tiny_model(tmp_path / "model"); write_data(tmp_path)
+    args = ["--train_csv", str(tmp_path / "train.csv"), "--pool", str(tmp_path / "pool.parquet"),
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", "B",
+            "--cap", "5", "--batch", "4", "--grad_accum", "1", "--save_steps", "20", "--probe_steps", "3",
+            "--lr", "5e-3", "--epochs", "1", "--quant_4bit", "0"]
+    assert tl.main(args) == 0
+    d = np.load(tmp_path / "out" / "oof_B.npz")
+    assert d["probs"].shape == (36, 18) and np.allclose(d["probs"].sum(1), 1, atol=1e-5)
+    assert (tmp_path / "out" / "adapter" / "adapter_config.json").exists()
+    assert tl.last_checkpoint(tmp_path / "out" / "ckpt") is not None
+
+
+def test_main_aborts_when_estimate_too_high(tmp_path):
+    tiny_model(tmp_path / "model"); write_data(tmp_path)
+    args = ["--train_csv", str(tmp_path / "train.csv"), "--pool", "", "--use_pool", "0",
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", "A",
+            "--batch", "2", "--grad_accum", "1", "--probe_steps", "2", "--max_hours", "0.0000001",
+            "--epochs", "3", "--quant_4bit", "0"]
+    assert tl.main(args) == 2
+    assert not (tmp_path / "out" / "oof_A.npz").exists()

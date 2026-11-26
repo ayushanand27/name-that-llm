@@ -43,6 +43,16 @@ def softmax(logits):
     return e / e.sum(axis=1, keepdims=True)
 
 
+def length_grouping(training_args_cls):
+    """Batches passages of similar length together (less padding, faster). The argument name changed in
+    transformers 5, so pick whichever this version has."""
+    import inspect
+    params = inspect.signature(training_args_cls.__init__).parameters
+    if "train_sampling_strategy" in params:
+        return {"train_sampling_strategy": "group_by_length"}
+    return {"group_by_length": True} if "group_by_length" in params else {}
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_csv", required=True)
@@ -67,6 +77,7 @@ def parse_args(argv=None):
     ap.add_argument("--max_hours", type=float, default=8.0, help="abort after the probe if the estimate is above this")
     ap.add_argument("--time_budget_h", type=float, default=10.5, help="save and stop training after this much wall clock")
     ap.add_argument("--probe_only", type=int, default=0, help="stop right after the speed probe")
+    ap.add_argument("--quant_4bit", type=int, default=1, help="0 only for the CPU smoke test")
     return ap.parse_args(argv)
 
 
@@ -115,14 +126,19 @@ def main(argv=None):
     n_tok = sum(min(len(x), a.max_len) for x in ds_tr.enc["input_ids"])
     say(f"tokens per epoch {n_tok:,} (mean {n_tok / len(ds_tr):.0f} per passage)")
 
-    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
-                             bnb_4bit_compute_dtype=torch.float16)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        a.model_path, num_labels=len(labels), quantization_config=bnb, torch_dtype=torch.float16,
-        device_map={"": local_rank})
-    model.config.pad_token_id = tok.pad_token_id
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True,
-                                            gradient_checkpointing_kwargs={"use_reentrant": False})
+    gpu = torch.cuda.is_available()
+    if a.quant_4bit:
+        bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+                                 bnb_4bit_compute_dtype=torch.float16)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            a.model_path, num_labels=len(labels), quantization_config=bnb, torch_dtype=torch.float16,
+            device_map={"": local_rank})
+        model.config.pad_token_id = tok.pad_token_id
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True,
+                                                gradient_checkpointing_kwargs={"use_reentrant": False})
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(a.model_path, num_labels=len(labels))
+        model.config.pad_token_id = tok.pad_token_id
     lcfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=a.lora_r, lora_alpha=2 * a.lora_r, lora_dropout=0.05,
                       target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     model = get_peft_model(model, lcfg)
@@ -157,11 +173,11 @@ def main(argv=None):
 
     targs = TrainingArguments(
         output_dir=str(out / "ckpt"), num_train_epochs=a.epochs, learning_rate=a.lr, lr_scheduler_type="cosine",
-        warmup_ratio=0.03, per_device_train_batch_size=a.batch, per_device_eval_batch_size=a.batch * 2,
-        gradient_accumulation_steps=a.grad_accum, fp16=True, logging_steps=25, save_strategy="steps",
-        save_steps=a.save_steps, save_total_limit=2, report_to="none", seed=a.seed, group_by_length=True,
-        dataloader_num_workers=2, ddp_find_unused_parameters=False, gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False)
+        warmup_steps=max(1, int(0.03 * total_steps)), per_device_train_batch_size=a.batch, per_device_eval_batch_size=a.batch * 2,
+        gradient_accumulation_steps=a.grad_accum, fp16=gpu, logging_steps=25, save_strategy="steps",
+        save_steps=a.save_steps, save_total_limit=2, report_to="none", seed=a.seed,
+        dataloader_num_workers=2 if gpu else 0, ddp_find_unused_parameters=False, gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False, **length_grouping(TrainingArguments))
     trainer = Trainer(model=model, args=targs, train_dataset=ds_tr, data_collator=DataCollatorWithPadding(tok),
                       callbacks=[Guard()])
     resume = last_checkpoint(a.resume_from) if a.resume_from else last_checkpoint(out / "ckpt")
