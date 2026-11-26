@@ -16,7 +16,7 @@ def test_date_counts():
 
 def test_groups_for_yardstick():
     g = pg.yardstick_groups(pool())
-    assert list(g) == ["3.7 before", "3.7 after", "3.7 after", None, None, "3.8", "3.8"]
+    assert list(g) == ["3.7 before", "3.7 after", "3.7 after", "3.7 no date", "3.7 no date", "3.8", "3.8"]
 
 
 def test_share_table_rows_sum_to_one():

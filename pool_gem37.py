@@ -24,12 +24,13 @@ def date_counts(pool):
 
 
 def yardstick_groups(pool):
-    """'3.7 before', '3.7 after', '3.8' or None for each row."""
+    """'3.7 before', '3.7 after', '3.7 no date', '3.8' or None for each row."""
     d = pd.to_datetime(pool.gen_date, errors="coerce", utc=True, format="mixed")
     after = d >= pd.Timestamp(pdm.GEM37_CUTOFF, tz="UTC")
     g = pd.Series([None] * len(pool), index=pool.index, dtype=object)
     is37 = pool.model == pdm.GEM37_LABEL
     g[is37 & d.notna() & ~after] = "3.7 before"
+    g[is37 & d.isna()] = "3.7 no date"
     g[is37 & after] = "3.7 after"
     g[pool.model == "gemini-3.8-flash"] = "3.8"
     return g
@@ -59,7 +60,7 @@ def main(argv=None):
     train = pd.DataFrame({"text": off.text.values, "label": off.model.map(ids).values})
     groups = yardstick_groups(pool)
     rows = []
-    for name in ("3.7 before", "3.7 after", "3.8"):
+    for name in ("3.7 before", "3.7 after", "3.7 no date", "3.8"):
         idx = groups.index[groups == name]
         if len(idx):
             rows.append(pool.loc[np.random.RandomState(0).choice(idx, min(len(idx), a.per_group), replace=False)].assign(grp=name))
