@@ -39,7 +39,9 @@ jobs:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           SLUG: ${{ inputs.slug }}
-        run: python kaggle_runner.py fetch --ref "$SLUG"
+        run: |
+          pip install --only-binary=:all: numpy==2.3.5
+          python kaggle_runner.py fetch --ref "$SLUG"
 
       - name: probe
         if: inputs.action == 'probe'

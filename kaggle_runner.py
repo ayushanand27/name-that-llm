@@ -155,6 +155,11 @@ def cmd_fetch(a):
             print("--- last error lines"); print("\n".join(error_lines(f.read_text())[-15:]))
     for f in sorted(res.rglob("oof_*.npz")):
         print("--- saved", f.relative_to(res))
+        try:
+            import numpy as np, oof_report
+            print("\n".join(oof_report.report_lines(np.load(f))))
+        except ImportError:
+            print("(install numpy to see the per-label report)")
     print(sh(["kaggle", "quota"], check=False))
 
 
