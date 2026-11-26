@@ -2,10 +2,12 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push or fetch", required: true, default: push, type: choice, options: [push, fetch]}
+      action: {description: "push, fetch or research (read-only: list/pull public notebooks)", required: true, default: push, type: choice, options: [push, fetch, research]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
+      refs:   {description: "research only: list, or pull owner/slug ..., or meta ds:owner/name ...", required: false, default: "list"}
 jobs:
   go:
+    if: inputs.action != 'research'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -22,3 +24,22 @@ jobs:
       - name: fetch
         if: inputs.action == 'fetch'
         run: python kaggle_runner.py fetch --ref "${{ inputs.slug }}"
+  research:
+    if: inputs.action == 'research'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: "pip install --only-binary=:all: kaggle==2.2.5 six==1.17.0"
+      - name: research (prints only)
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          REFS: ${{ inputs.refs }}
+        run: |
+          set -f
+          python research_pull.py $REFS
