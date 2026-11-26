@@ -53,3 +53,11 @@ def test_loss_problem_flat_aborts_only_at_probe_end():
 def test_scoring_estimate():
     # 512 passages in 64 s -> 0.125 s each -> 4,000 take 500 s = 8.3 min
     assert tl.scoring_minutes(seconds=64, n_scored=512, n_target=4000) == pytest.approx(500 / 60)
+
+
+def test_inside_root_keeps_paths_in_the_work_folder(tmp_path):
+    import pytest
+    assert tl.inside_root(tmp_path / "run", tmp_path) == (tmp_path / "run").resolve()
+    for bad in (tmp_path / ".." / "elsewhere", "/etc/x"):
+        with pytest.raises(ValueError):
+            tl.inside_root(bad, tmp_path)

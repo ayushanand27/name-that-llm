@@ -31,17 +31,25 @@ def scoring_minutes(seconds, n_scored, n_target=4000):
     return seconds / n_scored * n_target / 60
 
 
+def inside_root(path, root):
+    """Resolve `path` and stop if it points outside `root` (for example through ".."), so a bad
+    --out_dir can't write files anywhere else on the machine."""
+    root_p, p = Path(root).resolve(), Path(path).resolve()
+    if not p.is_relative_to(root_p):
+        raise ValueError(f"{p} is outside {root_p}")
+    return p
+
+
 def zero_head(model):
     """Set the new classifier head to zero so every class starts at equal odds (loss = ln 18 ~ 2.89), not at a
     random large loss: Qwen's last hidden state is large, so a random head starts near loss 45."""
     head = model.score
     if not head.weight.dtype.is_floating_point:      # a 4-bit packed head can't be zeroed this way; leave it
         print("head is quantized; not zeroed", flush=True)
-        return model
+        return
     head.weight.data.zero_()
     if getattr(head, "bias", None) is not None:
         head.bias.data.zero_()
-    return model
 
 
 def out_of_time(elapsed_s, budget_h):
@@ -87,6 +95,7 @@ def parse_args(argv=None):
     ap.add_argument("--pool", default="")
     ap.add_argument("--model_path", required=True)
     ap.add_argument("--out_dir", default="/kaggle/working/lora_run")
+    ap.add_argument("--work_root", default="/kaggle/working", help="out_dir must be inside this folder")
     ap.add_argument("--resume_from", default="", help="folder holding checkpoint-N from an earlier run's output")
     ap.add_argument("--run_name", default="run")
     ap.add_argument("--use_pool", type=int, default=1)
@@ -121,7 +130,7 @@ def main(argv=None):
     import pool_data as pdm
 
     t_start = time.time()
-    out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
+    out = inside_root(a.out_dir, a.work_root); out.mkdir(parents=True, exist_ok=True)
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     is_main = local_rank == 0

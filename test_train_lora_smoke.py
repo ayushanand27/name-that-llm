@@ -33,7 +33,7 @@ def write_data(tmp_path):
 def test_main_end_to_end(tmp_path):
     tiny_model(tmp_path / "model"); write_data(tmp_path)
     args = ["--train_csv", str(tmp_path / "train.csv"), "--pool", str(tmp_path / "pool.parquet"),
-            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", "B",
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--work_root", str(tmp_path), "--run_name", "B",
             "--cap", "5", "--batch", "4", "--grad_accum", "1", "--save_steps", "20", "--probe_steps", "3",
             "--lr", "5e-3", "--epochs", "1", "--quant_4bit", "0"]
     assert tl.main(args) == 0
@@ -46,7 +46,7 @@ def test_main_end_to_end(tmp_path):
 def test_main_aborts_when_estimate_too_high(tmp_path):
     tiny_model(tmp_path / "model"); write_data(tmp_path)
     args = ["--train_csv", str(tmp_path / "train.csv"), "--pool", "", "--use_pool", "0",
-            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", "A",
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--work_root", str(tmp_path), "--run_name", "A",
             "--batch", "2", "--grad_accum", "1", "--probe_steps", "2", "--max_hours", "0.0000001",
             "--epochs", "3", "--quant_4bit", "0"]
     assert tl.main(args) == 2
@@ -55,7 +55,7 @@ def test_main_aborts_when_estimate_too_high(tmp_path):
 
 def base_args(tmp_path, run):
     return ["--train_csv", str(tmp_path / "train.csv"), "--pool", str(tmp_path / "pool.parquet"),
-            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--run_name", run,
+            "--model_path", str(tmp_path / "model"), "--out_dir", str(tmp_path / "out"), "--work_root", str(tmp_path), "--run_name", run,
             "--cap", "5", "--batch", "4", "--grad_accum", "1", "--save_steps", "20", "--probe_steps", "3",
             "--lr", "5e-3", "--epochs", "1", "--quant_4bit", "0"]
 
@@ -80,7 +80,8 @@ def test_probe_only_reports_speed_losses_and_scoring_time(tmp_path, capsys):
 def test_zero_head_starts_at_equal_odds(tmp_path):
     from transformers import AutoModelForSequenceClassification
     tiny_model(tmp_path / "model")
-    m = tl.zero_head(AutoModelForSequenceClassification.from_pretrained(tmp_path / "model"))
+    m = AutoModelForSequenceClassification.from_pretrained(tmp_path / "model")
+    tl.zero_head(m)
     logits = m(input_ids=torch.tensor([[3, 4, 5]])).logits
     assert torch.all(logits == 0)
     loss = torch.nn.functional.cross_entropy(logits, torch.tensor([0]))

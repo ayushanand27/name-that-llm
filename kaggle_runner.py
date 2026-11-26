@@ -24,6 +24,23 @@ def append_cells(nb, cell_texts):
     return out
 
 
+def check_slug(slug):
+    """Stop unless the slug looks like a Kaggle notebook name (lowercase letters, digits, dashes), so it
+    can't carry a path like ../x into the file we write."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,49}", slug or ""):
+        raise SystemExit(f"bad slug {slug!r}: use 3-50 lowercase letters, digits or dashes")
+    return slug
+
+
+def inside(folder, name):
+    """Path for `name` in `folder`, refusing anything that would land outside it."""
+    root = Path(folder).resolve()
+    p = (root / name).resolve()
+    if p.parent != root:
+        raise SystemExit(f"refusing to write {name!r} outside {root}")
+    return p
+
+
 def make_metadata(meta, owner, slug, title=None):
     """New kernel metadata from the pulled one: same inputs, GPU on, internet off, private."""
     m = dict(meta)
@@ -109,7 +126,7 @@ def cmd_run(a):
     new = append_cells(json.loads(nb_file.read_text()), [Path(c).read_text() for c in a.cells])
     md = make_metadata(meta, owner, a.slug)
     out = Path(a.work + "_push"); out.mkdir(exist_ok=True)
-    (out / md["code_file"]).write_text(json.dumps(new))
+    inside(out, md["code_file"]).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
     print("pushing kernel id:", md["id"], flush=True)
@@ -221,8 +238,8 @@ def stdout_lines(log_text):
 def cmd_pool_train(a):
     owner = kaggle_owner()
     out = Path(a.work + "_pool"); out.mkdir(exist_ok=True)
-    md = pool_metadata(owner, a.slug)
-    (out / md["code_file"]).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
+    md = pool_metadata(owner, check_slug(a.slug))
+    inside(out, md["code_file"]).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("pushing kernel id:", md["id"], "run", a.run, "flags:", pool_run_args(a.run), flush=True)
     print(sh(["kaggle", "kernels", "push", "-p", str(out)]))

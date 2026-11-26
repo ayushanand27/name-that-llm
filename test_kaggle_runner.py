@@ -119,3 +119,15 @@ def test_launch_cell_needs_exit_code_zero():
     import kaggle_runner as k
     src = "".join(k.build_pool_notebook([], "B", n_gpus=2)["cells"][-1]["source"])
     assert "assert rc == 0" in src
+
+
+def test_check_slug_and_inside_refuse_paths(tmp_path):
+    import pytest, kaggle_runner as k
+    assert k.check_slug("ayush-pool-b") == "ayush-pool-b"
+    for bad in ("../x", "a/b", "AB", "", "x"):
+        with pytest.raises(SystemExit):
+            k.check_slug(bad)
+    assert k.inside(tmp_path, "nb.ipynb") == (tmp_path / "nb.ipynb").resolve()
+    for bad in ("../nb.ipynb", "sub/nb.ipynb", "/tmp/nb.ipynb"):
+        with pytest.raises(SystemExit):
+            k.inside(tmp_path, bad)
