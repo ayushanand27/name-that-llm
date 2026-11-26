@@ -29,8 +29,9 @@ def main():
         subprocess.run(["unzip", "-o", "-q", z, "-d", "comp"], check=False)
     files = sorted(f for f in glob.glob("pool/**/*", recursive=True) if f.endswith((".csv", ".parquet")))
     print("pool files:", [(f, os.path.getsize(f)) for f in files])
-    for f in files[:6]:
-        describe(load(f), f)
+    for f in files:
+        if os.path.basename(f) in ("ntl_open_pool.parquet", "prompts.parquet", "per_model.csv"):
+            describe(load(f), f)
     if os.path.exists("comp/train.csv"):
         describe(load("comp/train.csv"), "official train.csv")
 
