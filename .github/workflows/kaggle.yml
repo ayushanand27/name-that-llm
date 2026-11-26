@@ -2,7 +2,7 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push or fetch", required: true, default: push, type: choice, options: [push, fetch]}
+      action: {description: "push, fetch, or probe (test what the token may do)", required: true, default: push, type: choice, options: [push, fetch, probe]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
 permissions:
   contents: read
@@ -38,3 +38,10 @@ jobs:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           SLUG: ${{ inputs.slug }}
         run: python kaggle_runner.py fetch --ref "$SLUG"
+
+      - name: probe
+        if: inputs.action == 'probe'
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: python kaggle_runner.py probe

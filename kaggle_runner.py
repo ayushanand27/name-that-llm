@@ -140,10 +140,32 @@ def cmd_fetch(a):
         print("--- last lines of", f.name); print("".join(f.read_text().splitlines(True)[-60:]))
 
 
+def cmd_probe(a):
+    """Push a one-line private kernel without and then with GPU, report which the account may do, delete both."""
+    owner = kaggle_owner()
+    for gpu in (False, True):
+        slug = "ci-probe-gpu" if gpu else "ci-probe-cpu"
+        d = Path(a.work + "_" + slug); d.mkdir(exist_ok=True)
+        (d / "probe.ipynb").write_text(json.dumps({"cells": [code_cell("print('ok')")], "metadata": {},
+                                                    "nbformat": 4, "nbformat_minor": 5}))
+        md = {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": "probe.ipynb",
+              "language": "python", "kernel_type": "notebook", "is_private": True, "enable_gpu": gpu,
+              "enable_internet": False, "competition_sources": ["name-that-llm"]}
+        (d / "kernel-metadata.json").write_text(json.dumps(md))
+        try:
+            sh(["kaggle", "kernels", "push", "-p", str(d)])
+            print(f"probe {'GPU' if gpu else 'CPU'} push: OK", flush=True)
+            sh(["kaggle", "kernels", "delete", "-y", md["id"]], check=False)
+        except RuntimeError as e:
+            why = [l for l in str(e).splitlines() if l.strip()][1:3]
+            print(f"probe {'GPU' if gpu else 'CPU'} push: REFUSED ({' | '.join(why)[:200]})", flush=True)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(); s = p.add_subparsers(dest="c", required=True)
     r = s.add_parser("run"); r.add_argument("--src", required=True); r.add_argument("--slug", required=True)
     r.add_argument("--cells", nargs="+", required=True); r.add_argument("--work", default="kr_work"); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
     f = s.add_parser("fetch"); f.add_argument("--ref", required=True); f.add_argument("--work", default="kr_work")
     f.add_argument("--wait", action="store_true"); f.set_defaults(f=cmd_fetch)
+    pr = s.add_parser("probe"); pr.add_argument("--work", default="kr_work"); pr.set_defaults(f=cmd_probe)
     a = p.parse_args(); a.f(a)
