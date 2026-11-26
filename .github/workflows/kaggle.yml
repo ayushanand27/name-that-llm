@@ -7,6 +7,7 @@ on:
       run:    {description: "pool_train only: probe (speed test), A, B or final", required: false, default: probe, type: choice, options: [probe, A, B, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
       show:   {description: "inspect only: notebook line ranges, e.g. 24:37-50 4:28-41", required: false, default: ""}
+      refs:   {description: "scan only: dataset refs to scan instead of searching", required: false, default: ""}
 permissions:
   contents: read
 jobs:
@@ -124,6 +125,7 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          REFS: ${{ inputs.refs }}
         run: |
           pip install --only-binary=:all: pyarrow==22.0.0 pandas==2.3.3 numpy==2.3.5 scipy==1.16.3 scikit-learn==1.7.2
           kaggle datasets download crtproduction/name-that-llm-open-pool -f ntl_open_pool.parquet -p pool -q

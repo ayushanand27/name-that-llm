@@ -10,7 +10,10 @@ import csv
 import hashlib
 import io
 import json
+import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +68,16 @@ def sh(cmd, check=True):
     return subprocess.run(cmd, check=check, capture_output=True, text=True).stdout
 
 
+def list_files(ref, tries=4):
+    """File list; Kaggle rate-limits fast listings, so an empty answer is retried with growing waits."""
+    for k in range(tries):
+        files = parse_list(sh(["kaggle", "datasets", "files", ref, "--csv", "--page-size", "200"], check=False).replace("name,", "ref,", 1))
+        if files:
+            return files
+        time.sleep(10 * (k + 1))
+    return []
+
+
 def candidates(extra):
     seen = {}
     for q in SEARCHES:
@@ -95,7 +108,9 @@ def main(argv=None):
     ap.add_argument("--extra", nargs="*", default=[])
     ap.add_argument("--max_mb", type=float, default=400)
     ap.add_argument("--per_label", type=int, default=300)
+    ap.add_argument("--only", nargs="*", default=[], help="scan just these refs (no search)")
     a = ap.parse_args(argv)
+    a.only = a.only or [r for r in os.environ.get("REFS", "").split() if re.fullmatch(r"[\w.-]+/[\w.-]+", r)]
     off = pd.read_csv(a.train_csv, dtype={"id": str})
     labels = pdm.check_labels(off)
     ids = {m: i for i, m in enumerate(labels)}
@@ -108,9 +123,10 @@ def main(argv=None):
     real = pd.Series((bt.fit_predict(train, ho, len(labels), seed=0).argmax(1) == ho.label.values)).groupby(
         np.asarray(labels)[ho.label.values]).mean()
     print("yardstick on real official holdout rows (share called its own label):", {k: round(float(v), 3) for k, v in real.items()})
-    cands = candidates(a.extra)
+    cands = {r: {"ref": r} for r in a.only} if a.only else candidates(a.extra)
     print(f"{len(cands)} candidate datasets")
     for ref, row in sorted(cands.items()):
+        time.sleep(3)
         print(f"\n== {ref}  updated {row.get('lastUpdated', '?')}  size {row.get('size', '?')}  downloads {row.get('downloadCount', '?')}")
         d = Path("scan") / ref.replace("/", "__")
         d.mkdir(parents=True, exist_ok=True)
@@ -120,7 +136,7 @@ def main(argv=None):
             m = json.loads(mp.read_text())
             lic = [l.get("name") for l in m.get("licenses", [])]
             print(f"  licence {lic}; subtitle: {str(m.get('subtitle') or '')[:120]}")
-        files = parse_list(sh(["kaggle", "datasets", "files", ref, "--csv", "--page-size", "200"], check=False).replace("name,", "ref,", 1))
+        files = list_files(ref)
         tables = [f for f in files if f["ref"].endswith((".csv", ".parquet", ".jsonl", ".json"))]
         big = [f["ref"] for f in tables if int(f.get("size") or 0) > a.max_mb * 2**20]
         print(f"  {len(files)} files, {len(tables)} tables" + (f", skipped over {a.max_mb:.0f} MB: {big}" if big else ""))
