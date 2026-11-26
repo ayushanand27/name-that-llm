@@ -2,7 +2,7 @@ name: kaggle-run
 on:
   workflow_dispatch:
     inputs:
-      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect, head_cv, gem37]}
+      action: {description: "push, fetch, probe (test what the token may do) or peek (Open Pool columns)", required: true, default: push, type: choice, options: [push, fetch, probe, peek, pool_train, baseline, inspect, head_cv, gem37, free_models]}
       slug:   {description: "name for the Kaggle notebook (lowercase, dashes)", required: true, default: ayush-cut256-cv}
       run:    {description: "pool_train only: probe (speed test), A, B or final", required: false, default: probe, type: choice, options: [probe, A, B, final]}
       gpus:   {description: "pool_train only: GPUs to train on (1 or 2)", required: false, default: "2"}
@@ -112,3 +112,6 @@ jobs:
           kaggle competitions download name-that-llm -f train.csv -p comp -q
           for z in pool/*.zip comp/*.zip; do [ -f "$z" ] && unzip -o -q "$z" -d "$(dirname "$z")"; done
           python pool_gem37.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet
+      - name: free_models
+        if: inputs.action == 'free_models'
+        run: python list_free_models.py
