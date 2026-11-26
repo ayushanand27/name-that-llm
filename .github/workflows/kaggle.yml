@@ -112,6 +112,10 @@ jobs:
           kaggle competitions download name-that-llm -f train.csv -p comp -q
           for z in pool/*.zip comp/*.zip; do [ -f "$z" ] && unzip -o -q "$z" -d "$(dirname "$z")"; done
           python pool_gem37.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet
+          echo "== TF-IDF B, switch off vs on (same grouped holdout)"
+          python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --drop_gem37_after_oct8 0 --out oof_g37_off.npz | grep -E "holdout|gemini-3\.[678]-flash"
+          python baseline_tfidf.py --train_csv comp/train.csv --pool pool/ntl_open_pool.parquet --use_pool 1 --drop_gem37_after_oct8 1 --out oof_g37_on.npz | grep -E "holdout|gemini-3\.[678]-flash"
+          python -c "import baseline_tfidf as b; print('\n'.join(b.compare_oof(['oof_g37_off.npz','oof_g37_on.npz'])))"
       - name: free_models
         if: inputs.action == 'free_models'
         run: python list_free_models.py

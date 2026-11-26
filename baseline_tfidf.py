@@ -78,7 +78,7 @@ def main():
     print(f"train rows {len(train)} (official {int(train.is_official.sum())}), holdout rows {len(hold)}", flush=True)
     probs = fit_predict(train, hold, len(labels), a.seed)
     print("\n".join(report_lines(hold, probs, labels)))
-    save_oof(a.out, hold, probs, labels, run_name=f"tfidf_pool{a.use_pool}_kimi{a.kimi_high_only}")
+    save_oof(a.out, hold, probs, labels, run_name=f"tfidf_pool{a.use_pool}_kimi{a.kimi_high_only}_g37drop{a.drop_gem37_after_oct8}")
 
 
 if __name__ == "__main__":
