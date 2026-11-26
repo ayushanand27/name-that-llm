@@ -33,3 +33,23 @@ def test_softmax_rows():
     import numpy as np
     p = tl.softmax(np.array([[0.0, 0.0], [1000.0, 0.0]]))
     assert p[0].tolist() == [0.5, 0.5] and p[1, 0] == pytest.approx(1.0)
+
+
+def test_loss_problem_finite_falling_is_ok():
+    assert tl.loss_problem([2.9, 2.7, 2.4, 2.1], at_probe_end=True) is None
+
+
+def test_loss_problem_nan_or_inf_aborts_anytime():
+    assert tl.loss_problem([2.9, float("nan")], at_probe_end=False) == "non-finite loss"
+    assert tl.loss_problem([float("inf")], at_probe_end=False) == "non-finite loss"
+
+
+def test_loss_problem_flat_aborts_only_at_probe_end():
+    assert tl.loss_problem([2.9, 2.9, 2.95], at_probe_end=False) is None
+    assert tl.loss_problem([2.9, 2.9, 2.95], at_probe_end=True) == "loss not falling"
+    assert tl.loss_problem([2.9], at_probe_end=True) is None          # one value: nothing to compare yet
+
+
+def test_scoring_estimate():
+    # 512 passages in 64 s -> 0.125 s each -> 4,000 take 500 s = 8.3 min
+    assert tl.scoring_minutes(seconds=64, n_scored=512, n_target=4000) == pytest.approx(500 / 60)

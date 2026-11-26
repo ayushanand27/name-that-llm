@@ -16,6 +16,21 @@ def probe_decision(elapsed_s, probe_steps, steps_left, limit_h):
     return est_h, est_h > limit_h
 
 
+def loss_problem(losses, at_probe_end):
+    """Why training should stop, or None. Any NaN/inf loss stops it at once (fp16 overflow on T4);
+    at the end of the speed probe the latest loss must also be below the first one, or it isn't learning."""
+    if any(not math.isfinite(x) for x in losses):
+        return "non-finite loss"
+    if at_probe_end and len(losses) >= 2 and losses[-1] >= losses[0]:
+        return "loss not falling"
+    return None
+
+
+def scoring_minutes(seconds, n_scored, n_target=4000):
+    """Minutes to score n_target passages, from the time it took to score n_scored."""
+    return seconds / n_scored * n_target / 60
+
+
 def out_of_time(elapsed_s, budget_h):
     """True once the run has used its wall-clock budget, so it saves and stops before Kaggle's 12 h cut."""
     return elapsed_s > budget_h * 3600
@@ -66,6 +81,7 @@ def parse_args(argv=None):
     ap.add_argument("--kimi_high_only", type=int, default=0)
     ap.add_argument("--drop_flag_kb_proxy", type=int, default=0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--holdout_frac", type=float, default=0.2, help="0 = final retrain on 100% of official rows")
     ap.add_argument("--max_len", type=int, default=256)
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -99,7 +115,8 @@ def main(argv=None):
     say = (lambda *x: print(*x, flush=True)) if is_main else (lambda *x: None)
 
     cfg = pdm.Config(use_pool=bool(a.use_pool), cap=a.cap, kimi_high_only=bool(a.kimi_high_only),
-                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), seed=a.seed)
+                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), seed=a.seed,
+                     holdout_frac=a.holdout_frac)
     official = pd.read_csv(a.train_csv, dtype={"id": str, "prompt_id": str})
     pool = pd.read_parquet(a.pool) if cfg.use_pool else official.iloc[:0]
     train, hold, labels = pdm.build_dataset(official, pool, cfg)
@@ -122,7 +139,8 @@ def main(argv=None):
                 item["labels"] = int(self.y[i])
             return item
 
-    ds_tr, ds_ho = DS(train), DS(hold)
+    ds_tr = DS(train)
+    ds_ho = DS(hold) if len(hold) else None
     n_tok = sum(min(len(x), a.max_len) for x in ds_tr.enc["input_ids"])
     say(f"tokens per epoch {n_tok:,} (mean {n_tok / len(ds_tr):.0f} per passage)")
 
@@ -147,22 +165,43 @@ def main(argv=None):
             p.data = p.data.float()
 
     total_steps = math.ceil(steps_per_epoch(len(ds_tr), a.batch, a.grad_accum, world) * a.epochs)
-    state = {"aborted": False, "t_probe": None}
+    state = {"aborted": False, "t_probe": None, "losses": []}
+    probe_end = 5 + a.probe_steps
+
+    def stop(control, why):
+        say(f"ABORT: {why}")
+        state["aborted"] = True
+        control.should_training_stop = True
+        control.should_save = False
 
     class Guard(TrainerCallback):
-        """Speed probe after `probe_steps` steps, then a wall-clock guard on every step."""
+        """Loss guard on every log, speed probe after `probe_steps` steps, wall-clock guard on every step."""
+        def on_log(self, args, st, control, logs=None, **kw):
+            if logs and "loss" in logs:
+                state["losses"].append(float(logs["loss"]))
+                why = loss_problem(state["losses"], at_probe_end=False)
+                if why:
+                    say(f"losses so far: {[round(x, 4) for x in state['losses']]}")
+                    stop(control, why)
+            return control
+
         def on_step_end(self, args, st, control, **kw):
             if st.global_step == 5:
                 state["t_probe"] = time.time()
-            if state["t_probe"] and st.global_step == 5 + a.probe_steps:
+            if state["t_probe"] and st.global_step == probe_end:
                 el = time.time() - state["t_probe"]
                 est, abort = probe_decision(el, a.probe_steps, total_steps - st.global_step, a.max_hours)
                 tps = n_tok * a.epochs / total_steps * a.probe_steps / el
                 say(f"speed probe: {el / a.probe_steps:.2f} s/step, ~{tps:,.0f} tokens/s, "
                     f"{total_steps - st.global_step} steps left, estimated {est:.2f} h more (limit {a.max_hours} h)")
-                if abort or a.probe_only:
-                    say("ABORT: estimate is over the limit" if abort else "probe only: stopping")
-                    state["aborted"] = True
+                say(f"first losses (every {args.logging_steps} steps): {[round(x, 4) for x in state['losses']]}")
+                why = loss_problem(state["losses"], at_probe_end=True)
+                if why:
+                    stop(control, why)
+                elif abort:
+                    stop(control, "estimate is over the limit")
+                elif a.probe_only:
+                    say("probe only: stopping training")
                     control.should_training_stop = True
                     control.should_save = False
             if out_of_time(time.time() - t_start, a.time_budget_h):
@@ -174,7 +213,7 @@ def main(argv=None):
     targs = TrainingArguments(
         output_dir=str(out / "ckpt"), num_train_epochs=a.epochs, learning_rate=a.lr, lr_scheduler_type="cosine",
         warmup_steps=max(1, int(0.03 * total_steps)), per_device_train_batch_size=a.batch, per_device_eval_batch_size=a.batch * 2,
-        gradient_accumulation_steps=a.grad_accum, fp16=gpu, logging_steps=25, save_strategy="steps",
+        gradient_accumulation_steps=a.grad_accum, fp16=gpu, logging_steps=5, save_strategy="steps",
         save_steps=a.save_steps, save_total_limit=2, report_to="none", seed=a.seed,
         dataloader_num_workers=2 if gpu else 0, ddp_find_unused_parameters=False, gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False, **length_grouping(TrainingArguments))
@@ -185,11 +224,22 @@ def main(argv=None):
         say(f"resuming from {resume}")
     trainer.train(resume_from_checkpoint=resume)
     if state["aborted"]:
-        say("stopped after the probe; no adapter or holdout probabilities saved")
+        say("stopped; no adapter or holdout probabilities saved")
         return 2
+    if a.probe_only:
+        n = min(len(hold), 512)
+        t0 = time.time()
+        trainer.predict(DS(hold.iloc[:n]))
+        el = time.time() - t0
+        say(f"scoring {n} holdout passages took {el:.1f} s -> about {scoring_minutes(el, n):.1f} min for 4,000 "
+            f"({'4-bit' if a.quant_4bit else 'full precision'}, max_len {a.max_len}, {world} GPU)")
+        return 0
     if is_main:
         model.save_pretrained(str(out / "adapter"))
         tok.save_pretrained(str(out / "adapter"))
+    if len(hold) == 0:
+        say(f"no holdout (final retrain): saved adapter in {out}; total {(time.time() - t_start) / 3600:.2f} h")
+        return 0
     logits = trainer.predict(ds_ho).predictions
     if is_main:
         probs = softmax(np.asarray(logits, dtype=np.float64))
