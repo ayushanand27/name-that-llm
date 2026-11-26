@@ -6,7 +6,7 @@ Usage:
   python kaggle_runner.py run --src mathleteutd/name-that-llm-pb115-coverage-sibling-odds \
       --slug ayush-cut256-cv --cells cut256_cv_cell.txt decode_cell.txt
 """
-import argparse, json, re, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, time
 from pathlib import Path
 
 
@@ -58,6 +58,13 @@ def wait(ref, poll_s=300, max_s=12 * 3600, run=sh):
     return "timeout"
 
 
+def kaggle_owner(run=sh, env=os.environ):
+    """Kaggle username: KAGGLE_USERNAME if set (needed with the new single-token login), else from the CLI config."""
+    if env.get("KAGGLE_USERNAME"):
+        return env["KAGGLE_USERNAME"].strip()
+    return run(["kaggle", "config", "view"]).split("username:")[-1].split()[0]
+
+
 def cmd_run(a):
     work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
     sh(["kaggle", "kernels", "pull", a.src, "-p", str(work), "-m"])
@@ -65,7 +72,7 @@ def cmd_run(a):
     if nb_file is None:
         sys.exit("pulled notebook is not .ipynb (I am not sure this notebook can be pulled that way); open it in Kaggle instead")
     meta = json.loads((work / "kernel-metadata.json").read_text())
-    owner = sh(["kaggle", "config", "view"]).split("username:")[-1].split()[0]
+    owner = kaggle_owner()
     new = append_cells(json.loads(nb_file.read_text()), [Path(c).read_text() for c in a.cells])
     md = make_metadata(meta, owner, a.slug)
     out = Path(a.work + "_push"); out.mkdir(exist_ok=True)
@@ -80,7 +87,7 @@ def cmd_run(a):
 
 
 def cmd_fetch(a):
-    ref = a.ref if "/" in a.ref else sh(["kaggle", "config", "view"]).split("username:")[-1].split()[0] + "/" + a.ref
+    ref = a.ref if "/" in a.ref else kaggle_owner() + "/" + a.ref
     st = wait(ref) if a.wait else parse_status(sh(["kaggle", "kernels", "status", ref], check=False))
     print("status:", st)
     if st in ("running", "queued", "unknown"):

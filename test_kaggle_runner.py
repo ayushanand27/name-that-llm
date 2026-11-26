@@ -26,3 +26,9 @@ def test_fetch_not_finished(monkeypatch,capsys):
     import kaggle_runner as k,argparse
     monkeypatch.setattr(k,"sh",lambda c,check=True:'status "KernelWorkerStatus.RUNNING"')
     k.cmd_fetch(argparse.Namespace(ref="me/x",work="w",wait=False));assert "not finished" in capsys.readouterr().out
+def test_owner_from_env():
+    import kaggle_runner as k
+    assert k.kaggle_owner(run=lambda c:1/0,env={"KAGGLE_USERNAME":" me "})=="me"
+def test_owner_from_cli():
+    import kaggle_runner as k
+    assert k.kaggle_owner(run=lambda c:"username: bob\nx: y",env={})=="bob"
