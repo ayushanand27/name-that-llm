@@ -102,6 +102,7 @@ def parse_args(argv=None):
     ap.add_argument("--cap", type=int, default=1500)
     ap.add_argument("--kimi_high_only", type=int, default=0)
     ap.add_argument("--drop_flag_kb_proxy", type=int, default=0)
+    ap.add_argument("--drop_gem37_after_oct8", type=int, default=1, help="drop pool gemini-3.7 rows dated 8 Oct 2026 or later")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--holdout_frac", type=float, default=0.2, help="0 = final retrain on 100% of official rows")
     ap.add_argument("--max_len", type=int, default=256)
@@ -137,7 +138,7 @@ def main(argv=None):
     say = (lambda *x: print(*x, flush=True)) if is_main else (lambda *x: None)
 
     cfg = pdm.Config(use_pool=bool(a.use_pool), cap=a.cap, kimi_high_only=bool(a.kimi_high_only),
-                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), seed=a.seed,
+                     drop_flag_kb_proxy=bool(a.drop_flag_kb_proxy), drop_gem37_after_oct8=bool(a.drop_gem37_after_oct8), seed=a.seed,
                      holdout_frac=a.holdout_frac)
     official = pd.read_csv(a.train_csv, dtype={"id": str, "prompt_id": str})
     pool = pd.read_parquet(a.pool) if cfg.use_pool else official.iloc[:0]

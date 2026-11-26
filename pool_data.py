@@ -43,6 +43,22 @@ def apply_switches(pool, kimi_high_only, drop_flag_kb_proxy, kimi_label="kimi-k3
     return pool[keep].reset_index(drop=True)
 
 
+GEM37_LABEL, GEM37_CUTOFF = "gemini-3.7-flash", "2026-10-08"   # Google has served 3.8 for 3.7 requests since 8 Oct 2026
+
+
+def gem37_after_mask(pool, label=GEM37_LABEL, cutoff=GEM37_CUTOFF):
+    """True for pool rows labelled gemini-3.7-flash with gen_date on or after the cutoff (probably really 3.8).
+    Rows with no date, or a date that doesn't parse, are False (kept): there is nothing to judge them by."""
+    if "gen_date" not in pool.columns:
+        return pd.Series(False, index=pool.index)
+    d = pd.to_datetime(pool.gen_date, errors="coerce", utc=True, format="mixed")
+    return (pool.model == label) & (d >= pd.Timestamp(cutoff, tz="UTC"))
+
+
+def drop_gem37_after(pool, label=GEM37_LABEL, cutoff=GEM37_CUTOFF):
+    return pool[~gem37_after_mask(pool, label, cutoff)].reset_index(drop=True)
+
+
 def cap_per_label(pool, cap, seed):
     """Keeps at most `cap` random rows per label (same seed, same rows), so big labels don't drown small ones."""
     parts = [g.sample(n=min(cap, len(g)), random_state=seed) for _, g in pool.groupby("model", sort=True)]
@@ -64,6 +80,7 @@ class Config:
     cap: int = 1500
     kimi_high_only: bool = False
     drop_flag_kb_proxy: bool = False
+    drop_gem37_after_oct8: bool = True
     holdout_frac: float = 0.2
     seed: int = 42
     kimi_label: str = "kimi-k3"
@@ -84,6 +101,8 @@ def build_dataset(official, pool, cfg):
     if cfg.use_pool:
         p = pool[pool.model.isin(ids)]
         p = apply_switches(p, cfg.kimi_high_only, cfg.drop_flag_kb_proxy, cfg.kimi_label)
+        if cfg.drop_gem37_after_oct8:
+            p = drop_gem37_after(p)
         p = drop_duplicate_texts(p, official)
         p = cap_per_label(p, cfg.cap, cfg.seed)
         parts.append(_frame(p, ids, "pool:" + p.prompt_group.astype(str).values, False))
