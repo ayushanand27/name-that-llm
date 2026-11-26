@@ -123,6 +123,12 @@ def main(argv=None):
     real = pd.Series((bt.fit_predict(train, ho, len(labels), seed=0).argmax(1) == ho.label.values)).groupby(
         np.asarray(labels)[ho.label.values]).mean()
     print("yardstick on real official holdout rows (share called its own label):", {k: round(float(v), 3) for k, v in real.items()})
+    pool_s = pd.read_parquet(a.pool, columns=["text", "model"])
+    pool_s = pool_s[pool_s.model.isin(labels)].groupby("model", group_keys=False).apply(
+        lambda g: g.sample(min(len(g), a.per_label), random_state=0)).reset_index(drop=True)
+    hit = np.asarray(labels)[bt.fit_predict(train, pool_s, len(labels), seed=0).argmax(1)] == pool_s.model.values
+    print("yardstick on Open Pool rows, for reference (share called its own label):",
+          {k: round(float(v), 3) for k, v in pd.Series(hit).groupby(pool_s.model.values).mean().items()})
     cands = {r: {"ref": r} for r in a.only} if a.only else candidates(a.extra)
     print(f"{len(cands)} candidate datasets")
     for ref, row in sorted(cands.items()):
@@ -134,7 +140,8 @@ def main(argv=None):
         mp = d / "dataset-metadata.json"
         if mp.exists():
             m = json.loads(mp.read_text())
-            lic = [l.get("name") for l in m.get("licenses", [])]
+            m = m.get("info", m) if isinstance(m, dict) else {}
+            lic = [l.get("name") or l.get("nameNullable") for l in (m.get("licenses") or [])]
             print(f"  licence {lic}; subtitle: {str(m.get('subtitle') or '')[:120]}")
         files = list_files(ref)
         tables = [f for f in files if f["ref"].endswith((".csv", ".parquet", ".jsonl", ".json"))]
