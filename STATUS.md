@@ -1,40 +1,34 @@
 # STATUS
 
 ## 1. UPDATED
-26 Nov 2026, 14:31 IST
+27 Nov 2026, 01:00 IST
 
 ## 2. DONE
-- PR #1 workflow fix; PR #2 QLoRA trainer (4x loss and gradient bug fixed, probe passed), .pyc removed (2 files). Both draft, not merged.
-- head_cv.py (GitHub CPU): PB115 head alone 0.2438 [0.2293, 0.2590]; GLM pair recall 0.74-0.75, others 0.07-0.38. It is a GLM specialist inside the stack, not the 0.719 pipeline.
-- 115 features = frozen GLM model stats (no labels), so CV is not leaky; feature choice may be tuned on train (not sure).
-- blend_eval.py rebuilt: any number of OOF files, greedy 0.05 weights, report via compare(), cross-fit line.
-- generate_data.py: OpenRouter :free only, /key budget, 15/min, served-model check; 119 tests pass in PR #4.
-- Part A scan: 70 datasets, 14 read. Most new rows: gtuli12/ntl-own-pool 68,680, dhruvtibarewal/nlm-matched-clean 36,600, arnabkarmakar/ntl-pinned-060 5,299. None copies official train.
-- Free models: 11 :free ids on OpenRouter today, 0 of our 18 labels match. Part B gives no rows.
-- Gemini 3.7 pool rows: 3,012 dated 8 Oct or later, 0 before, 529 undated. TF-IDF B switch off -> on: 0.3889 -> 0.3889, +0.0000 [-0.0185, +0.0167] -> DROP. 3.7 recall falls 0.433 -> 0.033.
+- Run B (diagnostics only): holdout BA 0.0463 [0.0278, 0.0667] = bug, not the model. transformers 5 also length-groups the predict loader, so B's probabilities were shuffled against their rows. Reproduced on CPU (0.06 vs 0.97 after fix). B's per-label recall is unusable; run P's replaces it.
+- Fix: in-order predict sampler + order check (direct forward on 16 rows must agree, or nothing is saved) + test-set scoring. 131 tests pass, PR #4.
+- Switches per Ayush: drop_flag_kb_proxy default ON (all retrains), drop_gem37_after_oct8 default OFF.
+- head_cv.py: PB115 head alone 0.2438 [0.2293, 0.2590] (GLM specialist, not the 0.719 stack). Features not leaky.
+- blend_eval.py, generate_data.py (OpenRouter :free; 0 of 18 labels match), list_free_models.py, datasets_scan.py (70 found, 14 read).
+- Gemini 3.7 switch: +0.0000 [-0.0185, +0.0167] -> DROP.
 
 ## 3. RUNNING
-- ayushanand2327/ayush-pool-b: run B (Qwen3-8B QLoRA, official + pool cap 1500, 1 epoch, 2x T4). Started 26 Nov 12:40 IST, expected finish about 15:30 IST.
-  Fetch: gh api -X POST repos/ayushanand27/name-that-llm/actions/workflows/kaggle.yml/dispatches -f ref=claude/project-thread-ts88fs-openpool -f 'inputs[action]=fetch' -f 'inputs[slug]=ayush-pool-b'
-  (or Actions > kaggle-run > Run workflow: action fetch, slug ayush-pool-b). The log has holdout BA, per-label recall and top mix-ups.
+- ayushanand2327/ayush-pool-p: run P (Qwen3-8B QLoRA, pool only, proxy rows dropped, cap 1500, 1 epoch, 2x T4). Scores all 2,699 official rows (out-of-fold) and test. Started 27 Nov 00:51 IST, expected finish about 03:45 IST (~2.8 h).
+  Fetch: gh api -X POST repos/ayushanand27/name-that-llm/actions/workflows/kaggle.yml/dispatches -f ref=claude/project-thread-ts88fs-tools -f 'inputs[action]=fetch' -f 'inputs[slug]=ayush-pool-p'
 
 ## 4. WAITING ON AYUSH
-- Final retrain: drop the 22,941 pool rows flagged as Benchmarks proxy after the ruling (--drop_flag_kb_proxy 1)? B kept them.
-- Gemini 3.7 switch fails the keep rule (and 3.7 recall collapses). Should I turn it off by default?
-- The PB115 head is not the 0.719 stack, so its head CV can't be the keep-rule yardstick. Should I use a blend of OOF files we can build (PB115 head, TF-IDF, our LoRA) as the yardstick, and the LB alone for Rohan's full stack?
-- (Final retrain already has your GO; it starts after B ends, if at least 3 GPU hours are left.)
+- Nothing right now. (Public datasets stay report-only; nothing gets added without your yes.)
 
 ## 5. NEXT
-1. Rerun the scan for 15 datasets Kaggle rate-limited (wait for the limit to clear first).
-2. Read thread 749455 for the host prompt style (Kaggle refused my fetch with "too many requests").
-3. When B ends: report it, then push the final retrain (slug ayush-pool-final, run final, 2 GPUs, about 2.75 h).
+1. Fetch P: report BA on 2,699 rows, per-label recall, top 10 confusions.
+2. Add P's 18 probabilities to the yardstick blend (PB115 head + TF-IDF + P) and test with the keep rule. Blend gain may not carry over to Rohan's full stack.
+3. Rescan the 15 rate-limited datasets (report only: licence, pool overlap, proxy-made or not).
 
 ## 6. GPU HOURS
-About 3.8 h used, about 26.2 h left this week (estimate, B still running). Resets Sat 28 Nov.
+5.44 h used, 24.56 h left before P; about 21.7 h left after P. Resets Sat 28 Nov 05:30 IST.
 
 ## 7. DECISIONS LOG
-- cut256 GLM test dropped (its feature check failed); run C dropped; final = B with no holdout.
-- Money is now $0: the paid kimi/qwen/claude generator is replaced by the OpenRouter :free version.
-- CPU jobs on GitHub print numbers only; daily OpenRouter job not built (no free model matches).
-- Background polling stopped (your no-poll rule); B is checked once when work allows.
-- PR #4 checks: Sonar E is the same constant-path false positive as PR #2 (mark safe in SonarCloud); the red 'go' run is my scan hitting Kaggle's rate limit, not a code fault.
+- Yardstick = CPU blend (PB115 head, TF-IDF, our LoRA); LB judges Rohan's full stack only; submit only at blend gain >= +0.008.
+- Proxy-flagged rows (22,941) dropped from every retrain; run B never goes into a submission.
+- Old final retrain (with proxy rows) cancelled; final recipe now drops them.
+- Money is $0: OpenRouter :free only; no daily job (no free model matches).
+- No background polling; runs are fetched once when work allows.
