@@ -24,6 +24,7 @@ def append_cells(nb, cell_texts):
     return out
 
 
+WORK = "kr_work"            # fixed local work folder (it is in .gitignore as *_work/)
 NB_FILE = "notebook.ipynb"   # fixed name, so nothing a user types ends up in a file path
 
 
@@ -110,7 +111,7 @@ def check_sources(md, run=sh):
 
 
 def cmd_run(a):
-    work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
+    work = Path(WORK); work.mkdir(parents=True, exist_ok=True)
     sh(["kaggle", "kernels", "pull", a.src, "-p", str(work), "-m"])
     nb_file = next(work.glob("*.ipynb"), None)
     if nb_file is None:
@@ -119,7 +120,7 @@ def cmd_run(a):
     owner = kaggle_owner()
     new = append_cells(json.loads(nb_file.read_text()), [Path(c).read_text() for c in a.cells])
     md = make_metadata(meta, owner, a.slug)
-    out = Path(a.work + "_push"); out.mkdir(exist_ok=True)
+    out = Path(WORK + "_push"); out.mkdir(exist_ok=True)
     (out / NB_FILE).write_text(json.dumps(new))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
     print("inputs kept:", {k: md.get(k) for k in ("dataset_sources", "competition_sources", "kernel_sources", "model_sources")})
@@ -137,7 +138,7 @@ def cmd_run(a):
     if a.no_wait:
         print("pushed; Kaggle runs it on its own. Later run the 'fetch' action with the same slug.")
         return
-    cmd_fetch(argparse.Namespace(ref=md["id"], work=a.work, wait=True, tail=80))
+    cmd_fetch(argparse.Namespace(ref=md["id"], wait=True, tail=80))
 
 
 def cmd_fetch(a):
@@ -146,7 +147,7 @@ def cmd_fetch(a):
     print("status:", st)
     if st in ("running", "queued", "unknown"):
         print("not finished yet; run fetch again later"); return
-    res = Path(a.work + "_out"); res.mkdir(exist_ok=True)
+    res = Path(WORK + "_out"); res.mkdir(exist_ok=True)
     sh(["kaggle", "kernels", "output", ref, "-p", str(res)], check=False)
     for f in res.glob("*.log"):
         print("--- last printed lines of", f.name); print("\n".join(stdout_lines(f.read_text())[-a.tail:]))
@@ -231,7 +232,7 @@ def stdout_lines(log_text):
 
 def cmd_pool_train(a):
     owner = kaggle_owner()
-    out = Path(a.work + "_pool"); out.mkdir(exist_ok=True)
+    out = Path(WORK + "_pool"); out.mkdir(exist_ok=True)
     md = pool_metadata(owner, check_slug(a.slug))
     (out / NB_FILE).write_text(json.dumps(build_pool_notebook(POOL_FILES, a.run, a.gpus)))
     (out / "kernel-metadata.json").write_text(json.dumps(md, indent=1))
@@ -245,7 +246,7 @@ def cmd_probe(a):
     owner = kaggle_owner()
     for gpu in (False, True):
         slug = "ci-probe-gpu" if gpu else "ci-probe-cpu"
-        d = Path(a.work + "_" + slug); d.mkdir(exist_ok=True)
+        d = Path(WORK + "_" + slug); d.mkdir(exist_ok=True)
         (d / "probe.ipynb").write_text(json.dumps({"cells": [code_cell("print('ok')")], "metadata": {},
                                                     "nbformat": 4, "nbformat_minor": 5}))
         md = {"id": f"{owner}/{slug}", "title": slug.replace("-", " "), "code_file": "probe.ipynb",
@@ -264,11 +265,11 @@ def cmd_probe(a):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(); s = p.add_subparsers(dest="c", required=True)
     r = s.add_parser("run"); r.add_argument("--src", required=True); r.add_argument("--slug", required=True)
-    r.add_argument("--cells", nargs="+", required=True); r.add_argument("--work", default="kr_work"); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
-    f = s.add_parser("fetch"); f.add_argument("--ref", required=True); f.add_argument("--work", default="kr_work")
+    r.add_argument("--cells", nargs="+", required=True); r.add_argument("--no-wait", action="store_true"); r.set_defaults(f=cmd_run)
+    f = s.add_parser("fetch"); f.add_argument("--ref", required=True)
     f.add_argument("--tail", type=int, default=80)
     f.add_argument("--wait", action="store_true"); f.set_defaults(f=cmd_fetch)
     pt = s.add_parser("pool_train"); pt.add_argument("--slug", required=True); pt.add_argument("--run", required=True, choices=sorted(POOL_RUNS))
-    pt.add_argument("--gpus", type=int, default=2); pt.add_argument("--work", default="kr_work"); pt.set_defaults(f=cmd_pool_train)
-    pr = s.add_parser("probe"); pr.add_argument("--work", default="kr_work"); pr.set_defaults(f=cmd_probe)
+    pt.add_argument("--gpus", type=int, default=2); pt.set_defaults(f=cmd_pool_train)
+    pr = s.add_parser("probe"); pr.set_defaults(f=cmd_probe)
     a = p.parse_args(); a.f(a)
