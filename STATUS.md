@@ -1,7 +1,7 @@
 # STATUS
 
 ## 1. UPDATED
-26 Nov 2026, 14:40 IST
+26 Nov 2026, 14:31 IST
 
 ## 2. DONE
 - PR #1 workflow fix; PR #2 QLoRA trainer (4x loss and gradient bug fixed, probe passed), .pyc removed (2 files). Both draft, not merged.
@@ -37,3 +37,4 @@ About 3.8 h used, about 26.2 h left this week (estimate, B still running). Reset
 - Money is now $0: the paid kimi/qwen/claude generator is replaced by the OpenRouter :free version.
 - CPU jobs on GitHub print numbers only; daily OpenRouter job not built (no free model matches).
 - Background polling stopped (your no-poll rule); B is checked once when work allows.
+- PR #4 checks: Sonar E is the same constant-path false positive as PR #2 (mark safe in SonarCloud); the red 'go' run is my scan hitting Kaggle's rate limit, not a code fault.
